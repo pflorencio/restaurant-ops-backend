@@ -1,34 +1,23 @@
 modules = ["python-3.11"]
-[agent]
-expertMode = true
+
+[project]
+name = "restaurant-ops-backend"
+description = "FastAPI backend for Restaurant Operations Dashboard"
+language = "python"
+
+# ✅ Ensure Replit passes its dynamic port
+run = "python3 main.py"
 
 [nix]
 channel = "stable-25_05"
+packages = ["libxcrypt"]
 
-[workflows]
-runButton = "Project"
+[env]
+PORT = "8000" # fallback to 8000 if Replit doesn't inject one
 
-[[workflows.workflow]]
-name = "Project"
-mode = "parallel"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "workflow.run"
-args = "FastAPI Server"
-
-[[workflows.workflow]]
-name = "FastAPI Server"
-author = "agent"
-
-[[workflows.workflow.tasks]]
-task = "shell.exec"
-args = "python main.py"
-waitForPort = 8000
-
-[workflows.workflow.metadata]
-outputType = "console"
+[agent]
+expertMode = true
 
 [[ports]]
 localPort = 8000
-externalPort = 8000
+externalPort = "public"
