@@ -10,7 +10,7 @@ run = "uvicorn main:app --host 0.0.0.0 --port 8080"
 
 [nix]
 channel = "stable-25_05"
-packages = ["libxcrypt"]
+packages = ["cacert", "cargo", "glibcLocales", "libiconv", "libuv", "libxcrypt", "rustc"]
 
 [env]
 PORT = "8000" # fallback to 8000 if Replit doesn't inject one
@@ -20,8 +20,28 @@ expertMode = true
 
 [[ports]]
 localPort = 8000
-externalPort = 80
+externalPort = 8000
 
-[[ports]]
-localPort = 8080
-externalPort = 8080
+[workflows]
+runButton = "Project"
+
+[[workflows.workflow]]
+name = "Project"
+mode = "parallel"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "workflow.run"
+args = "FastAPI Server"
+
+[[workflows.workflow]]
+name = "FastAPI Server"
+author = "agent"
+
+[[workflows.workflow.tasks]]
+task = "shell.exec"
+args = "python main.py"
+waitForPort = 8000
+
+[workflows.workflow.metadata]
+outputType = "console"
