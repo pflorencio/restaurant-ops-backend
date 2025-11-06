@@ -18,18 +18,13 @@ load_dotenv()
 # ---------- App Initialization ----------
 app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.9")
 
-@app.middleware("http")
-async def global_cors_middleware(request: Request, call_next):
-    response = await call_next(request)
-    response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
-    return response
-
-# ✅ Simplified + Replit-safe CORS configuration
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=[
+        "http://localhost:5000",  # for local dev (Vite)
+        "https://restaurant-ops-dashboard.onrender.com",  # when you deploy frontend
+        "https://restaurant-ops-frontend.vercel.app",     # optional future
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
