@@ -6,7 +6,7 @@ from datetime import date as dt_date, datetime
 from collections import defaultdict
 
 from fastapi import FastAPI, HTTPException, Query, Request, Path
-from fastapi.responses import JSONResponse, RedirectResponse
+from fastapi.responses import JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
@@ -16,32 +16,26 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.6")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.9")
 
-FRONTEND_URL = "https://3563c6a5-668d-424f-883c-7ddb59bab4de-00-2mvuzvagwi8eb.pike.replit.dev"
-
-app.add_middleware(
-    CORSMiddleware,
-    allow_origins=[FRONTEND_URL],
-    allow_credentials=True,
-    allow_methods=["GET", "POST", "PATCH", "OPTIONS"],
-    allow_headers=["Authorization", "Content-Type"],
-)
-
-
-# ✅ Middleware to enforce HTTPS (after CORS)
 @app.middleware("http")
-async def add_cors_headers(request: Request, call_next):
+async def global_cors_middleware(request: Request, call_next):
     response = await call_next(request)
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers[
-        "Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
-    response.headers[
-        "Access-Control-Allow-Headers"] = "Authorization, Content-Type"
+    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     return response
 
+# ✅ Simplified + Replit-safe CORS configuration
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-# ✅ OPTIONS fallback for browsers (covers Replit preflight)
+# ✅ OPTIONS fallback for browsers (preflight support)
 @app.options("/{rest_of_path:path}")
 async def options_handler(request: Request, rest_of_path: str):
     response = JSONResponse({"ok": True})
@@ -130,8 +124,6 @@ def upsert_closing(payload: ClosingCreate):
     """Create or update a daily closing record in Airtable (upsert by store + date) with lock check."""
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-
-        # ✅ Proper Airtable escaping for single quotes
         safe_store = payload.store.replace("'", "''")
         date_iso = payload.business_date.isoformat()
         formula = f"AND({{Store}}='{safe_store}', {{Date}}='{date_iso}')"
@@ -139,7 +131,6 @@ def upsert_closing(payload: ClosingCreate):
 
         existing = table.all(formula=formula, max_records=1)
 
-        # 🔹 Prepare safe field mapping
         fields = {
             "Date": date_iso,
             "Store": payload.store,
@@ -163,7 +154,6 @@ def upsert_closing(payload: ClosingCreate):
         }
         fields = {k: v for k, v in fields.items() if v is not None}
 
-        # 🧩 CASE 1: Record exists → check lock + update
         if existing:
             record = existing[0]
             record_id = record["id"]
@@ -192,7 +182,6 @@ def upsert_closing(payload: ClosingCreate):
                 updated.get("fields", {}),
             }
 
-        # 🆕 CASE 2: No existing record → create + lock
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
         print(
@@ -219,7 +208,6 @@ class UnlockPayload(BaseModel):
 
 
 def _constant_time_equal(a: str, b: str) -> bool:
-    """Compare strings without timing leaks."""
     if len(a) != len(b):
         return False
     result = 0
@@ -230,7 +218,6 @@ def _constant_time_equal(a: str, b: str) -> bool:
 
 @app.post("/closings/{record_id}/unlock")
 def unlock_closing(record_id: str, payload: UnlockPayload):
-    """Secure unlock route that requires MANAGER_PIN."""
     try:
         manager_pin = os.getenv("MANAGER_PIN")
         if not manager_pin:
@@ -271,7 +258,7 @@ def _airtable_filter_formula(business_date: Optional[str],
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
         )
     if store:
-        safe_store = store.replace("'", "''")  # Proper Airtable escaping
+        safe_store = store.replace("'", "''")
         clauses.append(f"{{Store}}='{safe_store}'")
     if not clauses:
         return None
@@ -280,30 +267,24 @@ def _airtable_filter_formula(business_date: Optional[str],
 
 # ---------- Unique Record Fetch (Prefill) ----------
 @app.get("/closings/unique")
-def get_unique_closing(
-        business_date: str = Query(..., description="YYYY-MM-DD"),
-        store: str = Query(...),
-):
-    """Return the single (store, date) daily closing if it exists."""
+def get_unique_closing(business_date: str = Query(...),
+                       store: str = Query(...)):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        safe_store = store.replace("'", "''")  # Proper Airtable escaping
+        safe_store = store.replace("'", "''")
         formula = f"AND({{Store}}='{safe_store}', {{Date}}='{business_date}')"
         print("🔍 /closings/unique formula:", formula)
-
         records = table.all(formula=formula, max_records=1)
         if not records:
             raise HTTPException(status_code=404,
                                 detail="No record for given store and date.")
-
         r = records[0]
         fields = r.get("fields", {})
         return {
             "id": r.get("id"),
             "lock_status": fields.get("Lock Status", "Unlocked"),
-            "fields": fields,
+            "fields": fields
         }
-
     except HTTPException:
         raise
     except Exception as e:
@@ -314,12 +295,9 @@ def get_unique_closing(
 
 # ---------- Listing ----------
 @app.get("/closings")
-def list_closings(
-        business_date: Optional[str] = Query(None),
-        store: Optional[str] = Query(None),
-        limit: int = Query(50, ge=1, le=200),
-):
-    """Fetch daily closings filtered by date and/or store."""
+def list_closings(business_date: Optional[str] = Query(None),
+                  store: Optional[str] = Query(None),
+                  limit: int = Query(50)):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         formula = _airtable_filter_formula(business_date, store)
@@ -330,7 +308,7 @@ def list_closings(
             "records": [{
                 "id": r.get("id"),
                 "fields": r.get("fields", {})
-            } for r in records],
+            } for r in records]
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -338,7 +316,6 @@ def list_closings(
 
 @app.get("/closings/{record_id}")
 def get_closing_by_id(record_id: str):
-    """Fetch a single daily closing record by Airtable record ID."""
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         record = table.get(record_id)
