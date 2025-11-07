@@ -33,8 +33,6 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-)
-
 # ✅ OPTIONS fallback for browsers (preflight support)
 @app.options("/{rest_of_path:path}")
 async def options_handler(request: Request, rest_of_path: str):
