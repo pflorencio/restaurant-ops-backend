@@ -124,7 +124,7 @@ def upsert_closing(payload: ClosingCreate):
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         safe_store = payload.store.replace("'", "''")
         date_iso = payload.business_date.isoformat()
-        formula = f"AND({{Store}}='{safe_store}', {{Date}}='{date_iso}')"
+        formula = f"AND({{Store}}='{store.replace('’', \"'\")}', IS_SAME({{Date}}, '{business_date}', 'day'))"
         print("🔍 UPSERT formula:", formula)
 
         existing = table.all(formula=formula, max_records=1)
@@ -270,7 +270,7 @@ def get_unique_closing(business_date: str = Query(...),
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         safe_store = store.replace("'", "''")
-        formula = f"AND({{Store}}='{safe_store}', {{Date}}='{business_date}')"
+        formula = f"AND({{Store}}='{store.replace('’', \"'\")}', IS_SAME({{Date}}, '{business_date}', 'day'))"
         print("🔍 /closings/unique formula:", formula)
         records = table.all(formula=formula, max_records=1)
         if not records:
