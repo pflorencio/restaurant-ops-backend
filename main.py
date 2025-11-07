@@ -21,9 +21,10 @@ app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.9")
 origins = [
     "http://localhost:5000",
     "http://127.0.0.1:5000",
-    "https://restaurant-ops-dashboard.onrender.com",
-    "https://restaurant-ops-frontend.vercel.app",
+    "https://restaurant-ops-dashboard-pflorencio.replit.app",
+    "https://restaurant-ops-backend.onrender.com",
 ]
+
 
 app.add_middleware(
     CORSMiddleware,
