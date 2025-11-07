@@ -18,16 +18,21 @@ load_dotenv()
 # ---------- App Initialization ----------
 app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.9")
 
+origins = [
+    "http://localhost:5000",  # ✅ local dev via Vite
+    "http://127.0.0.1:5000",  # ✅ fallback local
+    "https://restaurant-ops-dashboard.onrender.com",  # ✅ future deployed frontend
+    "https://restaurant-ops-frontend.vercel.app",     # ✅ optional Vercel deploy
+]
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=[
-        "http://localhost:5000",  # for local dev (Vite)
-        "https://restaurant-ops-dashboard.onrender.com",  # when you deploy frontend
-        "https://restaurant-ops-frontend.vercel.app",     # optional future
-    ],
+    allow_origins=origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
+)
+
 )
 
 # ✅ OPTIONS fallback for browsers (preflight support)
