@@ -117,9 +117,13 @@ def upsert_closing(payload: ClosingCreate):
         store = payload.store
         business_date = payload.business_date.isoformat()
 
-        # ✅ Fix: escape curly quotes and use IS_SAME for date comparison
-        clean_store = store.replace("’", "'").replace("‘", "'")
-        formula = f"AND({{Store}}='{clean_store}', IS_SAME({{Date}}, '{business_date}', 'day'))"
+        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "\\'")
+        formula = (
+            f"AND("
+            f"{{Store}}='{clean_store}', "
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
+            f")"
+        )
         print(f"/closings/unique formula: {formula}")
 
         existing = table.all(formula=formula, max_records=1)
@@ -245,8 +249,13 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
 def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        clean_store = store.replace("’", "'").replace("‘", "'")
-        formula = f"AND({{Store}}='{clean_store}', IS_SAME({{Date}}, '{business_date}', 'day'))"
+        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "\\'")
+        formula = (
+            f"AND("
+            f"{{Store}}='{clean_store}', "
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
+            f")"
+        )
         print(f"/closings/unique formula: {formula}")
         records = table.all(formula=formula, max_records=1)
         if not records:
