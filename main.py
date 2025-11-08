@@ -16,7 +16,7 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.3.9")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.4.0")
 
 origins = [
     "http://localhost:5000",
@@ -24,7 +24,6 @@ origins = [
     "https://restaurant-ops-dashboard-pflorencio.replit.app",
     "https://restaurant-ops-backend.onrender.com",
 ]
-
 
 app.add_middleware(
     CORSMiddleware,
@@ -53,6 +52,7 @@ def _airtable_table(table_name: str) -> Table:
 
 
 DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closings")
+HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History")
 
 
 # ---------- Models ----------
@@ -109,14 +109,38 @@ def airtable_test():
         return {"error": str(e)}
 
 
-# ---------- UPSERT (Create or Update) ----------
+# ---------- History Logger ----------
+def _log_history(store: str, business_date: str, action: str, fields: dict, submitted_by: str):
+    """Append a change log record to the Daily Closing History table."""
+    try:
+        table = _airtable_table(HISTORY_TABLE)
+        table.create({
+            "Store": store,
+            "Date": business_date,
+            "Action": action,
+            "Updated Fields": ", ".join(fields.keys()),
+            "Submitted By": submitted_by,
+            "Timestamp": datetime.now().isoformat(),
+        })
+        print(f"🧾 Logged {action} action for {store} on {business_date}")
+    except Exception as e:
+        print(f"⚠️ Failed to log history: {e}")
+
+
+# ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
 @app.post("/closings")
 def upsert_closing(payload: ClosingCreate):
-    """Create or update a daily closing record in Airtable (upsert by store + date) with lock check."""
+    """Create or update a daily closing record in Airtable (upsert by store + date) with validation and history logging."""
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        store = payload.store
+        store = payload.store.strip()
         business_date = payload.business_date.isoformat()
+
+        # --- Validation ---
+        if payload.total_sales < 0 or payload.net_sales < 0:
+            raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
+        if payload.total_sales < payload.net_sales:
+            raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
         clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "\\'")
         formula = (
@@ -125,13 +149,12 @@ def upsert_closing(payload: ClosingCreate):
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
-        print(f"/closings/unique formula: {formula}")
 
         existing = table.all(formula=formula, max_records=1)
 
         fields = {
             "Date": business_date,
-            "Store": payload.store,
+            "Store": store,
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
             "Cash Payments": payload.cash_payments,
@@ -148,10 +171,13 @@ def upsert_closing(payload: ClosingCreate):
             "Non Food Budget": payload.non_food_budget,
             "Staff Meal Budget": payload.staff_meal_budget,
             "Submitted By": payload.submitted_by,
+            "Last Updated By": payload.submitted_by,
             "Last Updated At": datetime.now().isoformat(),
         }
+
         fields = {k: v for k, v in fields.items() if v is not None}
 
+        # --- Existing Record (Update) ---
         if existing:
             record = existing[0]
             record_id = record["id"]
@@ -160,12 +186,13 @@ def upsert_closing(payload: ClosingCreate):
             if current_lock in ["Locked", "Verified"]:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Record for {payload.store} on {payload.business_date} is locked and cannot be modified.",
+                    detail=f"Record for {store} on {business_date} is locked and cannot be modified.",
                 )
 
             fields["Lock Status"] = "Locked"
             updated = table.update(record_id, fields)
-            print(f"🔁 Updated and locked record for {payload.store} on {payload.business_date}")
+            _log_history(store, business_date, "update", fields, payload.submitted_by)
+            print(f"🔁 Updated and locked record for {store} on {business_date}")
             return {
                 "status": "updated_locked",
                 "id": record_id,
@@ -173,9 +200,11 @@ def upsert_closing(payload: ClosingCreate):
                 "fields": updated.get("fields", {}),
             }
 
+        # --- New Record (Create) ---
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
-        print(f"🆕 Created and locked new record for {payload.store} on {payload.business_date}")
+        _log_history(store, business_date, "create", fields, payload.submitted_by)
+        print(f"🆕 Created and locked new record for {store} on {business_date}")
         return {
             "status": "created_locked",
             "id": created.get("id"),
@@ -250,173 +279,46 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
 def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "\\'")
+        clean_store = (
+            store.replace("’", "'")
+            .replace("‘", "'")
+            .replace("'", "\\'")
+            .strip()
+        )
         formula = (
             f"AND("
             f"{{Store}}='{clean_store}', "
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
-        print(f"/closings/unique formula: {formula}")
         records = table.all(formula=formula, max_records=1)
+
         if not records:
-            raise HTTPException(status_code=404, detail="No record for given store and date.")
+            return JSONResponse(
+                status_code=200,
+                content={
+                    "status": "empty",
+                    "message": f"No record found for {store} on {business_date}",
+                    "fields": {},
+                    "lock_status": "Unlocked",
+                },
+            )
+
         r = records[0]
         fields = r.get("fields", {})
-        return {"id": r.get("id"), "lock_status": fields.get("Lock Status", "Unlocked"), "fields": fields}
-    except HTTPException:
-        raise
+        return JSONResponse(
+            status_code=200,
+            content={
+                "status": "found",
+                "id": r.get("id"),
+                "lock_status": fields.get("Lock Status", "Unlocked"),
+                "fields": fields,
+            },
+        )
+
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
-        raise HTTPException(status_code=500, detail=f"Airtable query error: {str(e)}")
-
-
-# ---------- Listing ----------
-@app.get("/closings")
-def list_closings(business_date: Optional[str] = Query(None), store: Optional[str] = Query(None), limit: int = Query(50)):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        formula = _airtable_filter_formula(business_date, store)
-        records = table.all(max_records=limit, formula=formula)
-        return {"count": len(records), "records": [{"id": r.get("id"), "fields": r.get("fields", {})} for r in records]}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/closings/{record_id}")
-def get_closing_by_id(record_id: str):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record = table.get(record_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Record not found")
-        return {"id": record.get("id"), "fields": record.get("fields", {})}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------- Inline Editing (PATCH) ----------
-@app.patch("/closings/{record_id}")
-async def update_closing_field(record_id: str, request: Request):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        payload = await request.json()
-        if not payload or not isinstance(payload, dict):
-            raise HTTPException(status_code=400, detail="Empty or invalid JSON payload")
-
-        payload = {k: v for k, v in payload.items() if v is not None}
-        payload["Last Updated At"] = datetime.now().isoformat()
-
-        print(f"🔹 PATCH payload received for {record_id}: {payload}")
-        updated = table.update(record_id, payload)
-        print(f"✅ Airtable update response: {updated}")
-
-        return {
-            "id": updated.get("id"),
-            "fields": updated.get("fields", {}),
-            "updated_fields": list(payload.keys()),
-            "status": "success",
-        }
-
-    except Exception as e:
-        import traceback
-        print("❌ ERROR during update:")
-        traceback.print_exc()
-        raise HTTPException(status_code=500, detail=f"Update failed: {str(e)}")
-
-
-# ---------- Summary Report ----------
-def _format_php(amount: float | None) -> str:
-    try:
-        return f"₱{amount:,.0f}"
-    except Exception:
-        return "₱0"
-
-
-def _build_daily_summary_text(business_date: str, records: list[dict]) -> str:
-    grouped: dict[str, list[dict]] = defaultdict(list)
-    for r in records:
-        store = r.get("Store", "Unknown Store")
-        grouped[store].append(r)
-
-    lines = [f"Daily Sales Summary — {business_date}\n"]
-    for store, rows in grouped.items():
-        total_sales = sum([(r.get("Total Sales") or 0) for r in rows])
-        cash_payments = sum([(r.get("Cash Payments") or 0) for r in rows])
-        actual_cash_counted = sum([(r.get("Actual Cash Counted") or 0) for r in rows])
-        cash_float = sum([(r.get("Cash Float") or 0) for r in rows])
-        variance = actual_cash_counted - cash_payments - cash_float
-
-        lines.append(f"📍 {store}")
-        lines.append(f"- Total Sales: {_format_php(total_sales)} | Variance: {_format_php(variance)}")
-        lines.append("───────────────────────────────\n")
-    return "\n".join(lines)
-
-
-@app.get("/reports/daily-summary")
-def report_daily_summary(business_date: Optional[str] = Query(None), store: Optional[str] = Query(None), send: bool = Query(False)):
-    try:
-        if not business_date:
-            raise HTTPException(status_code=400, detail="business_date query param required (YYYY-MM-DD)")
-
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        formula = _airtable_filter_formula(business_date, store)
-        records = table.all(max_records=200, formula=formula)
-        fields_only = [r.get("fields", {}) for r in records]
-
-        body = _build_daily_summary_text(business_date, fields_only)
-        return {"preview": body}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------- Verification ----------
-@app.post("/verify")
-def verify_closing(payload: dict):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record_id = payload.get("record_id")
-        status = payload.get("status")
-        verified_by = payload.get("verified_by")
-
-        if status not in ["Verified", "Flagged"]:
-            raise HTTPException(status_code=400, detail="status must be 'Verified' or 'Flagged'")
-
-        fields = {
-            "Verified Status": status,
-            "Verified By": verified_by,
-            "Verified At": datetime.now().isoformat(),
-        }
-
-        updated = table.update(record_id, fields)
-        return {"id": updated.get("id"), "fields": updated.get("fields", {})}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-@app.get("/unverified")
-def list_unverified(limit: int = Query(100, ge=1, le=500)):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        formula = "OR({Verified Status}='Pending',{Verified Status}='Flagged',NOT({Verified Status}))"
-        records = table.all(max_records=limit, formula=formula)
-        data = []
-        for r in records:
-            f = r.get("fields", {})
-            data.append({
-                "id": r.get("id"),
-                "Date": f.get("Date"),
-                "Store": f.get("Store"),
-                "Total Sales": f.get("Total Sales"),
-                "Variance": f.get("Variance (Cash Payments vs Actual)"),
-                "Cash for Deposit": f.get("Cash for Deposit"),
-                "Transfer Needed": f.get("Transfer Needed"),
-                "Verified Status": f.get("Verified Status", "Pending"),
-                "Verified By": f.get("Verified By"),
-            })
-        return {"count": len(data), "records": data}
-    except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
 # ---------- Entrypoint ----------
