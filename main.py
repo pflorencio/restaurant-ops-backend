@@ -111,6 +111,14 @@ def airtable_test():
 
 
 # ---------- Hybrid History Logger ----------
+def _safe_serialize(obj):
+    """Safely convert datetime/date and other non-serializable types to strings."""
+    if isinstance(obj, (datetime, dt_date)):
+        return obj.isoformat()
+    if isinstance(obj, (dict, list, tuple)):
+        return json.loads(json.dumps(obj, default=_safe_serialize))
+    return obj
+
 def _log_history(
     *,
     action: str,
@@ -126,6 +134,9 @@ def _log_history(
     try:
         table = _airtable_table(HISTORY_TABLE)
         changed_csv = ", ".join(changed_fields) if changed_fields else None
+
+        safe_snapshot = _safe_serialize(fields_snapshot)
+
         table.create({
             "Date": business_date,
             "Store": store,
@@ -135,11 +146,12 @@ def _log_history(
             "Record ID": record_id,
             "Lock Status": lock_status,
             "Changed Fields": changed_csv,
-            "Snapshot": json.dumps(fields_snapshot, ensure_ascii=False),
+            "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
         })
         print(f"🧾 Logged {action} for {store} on {business_date}")
     except Exception as e:
         print(f"⚠️ Failed to log history: {e}")
+
 
 
 # ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
