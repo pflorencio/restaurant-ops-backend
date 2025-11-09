@@ -1,5 +1,6 @@
 import os
 import smtplib
+import json
 from email.message import EmailMessage
 from typing import Optional
 from datetime import date as dt_date, datetime
@@ -16,7 +17,7 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.4.0")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.0")
 
 origins = [
     "http://localhost:5000",
@@ -109,20 +110,34 @@ def airtable_test():
         return {"error": str(e)}
 
 
-# ---------- History Logger ----------
-def _log_history(store: str, business_date: str, action: str, fields: dict, submitted_by: str):
-    """Append a change log record to the Daily Closing History table."""
+# ---------- Hybrid History Logger ----------
+def _log_history(
+    *,
+    action: str,
+    store: str,
+    business_date: str,
+    fields_snapshot: dict,
+    submitted_by: str = None,
+    record_id: str = None,
+    lock_status: str = None,
+    changed_fields: Optional[list[str]] = None,
+):
+    """Logs both summary + full JSON snapshot of record changes."""
     try:
         table = _airtable_table(HISTORY_TABLE)
+        changed_csv = ", ".join(changed_fields) if changed_fields else None
         table.create({
-            "Store": store,
             "Date": business_date,
+            "Store": store,
             "Action": action,
-            "Updated Fields": ", ".join(fields.keys()),
-            "Submitted By": submitted_by,
+            "Changed By": submitted_by,
             "Timestamp": datetime.now().isoformat(),
+            "Record ID": record_id,
+            "Lock Status": lock_status,
+            "Changed Fields": changed_csv,
+            "Snapshot": json.dumps(fields_snapshot, ensure_ascii=False),
         })
-        print(f"🧾 Logged {action} action for {store} on {business_date}")
+        print(f"🧾 Logged {action} for {store} on {business_date}")
     except Exception as e:
         print(f"⚠️ Failed to log history: {e}")
 
@@ -191,7 +206,18 @@ def upsert_closing(payload: ClosingCreate):
 
             fields["Lock Status"] = "Locked"
             updated = table.update(record_id, fields)
-            _log_history(store, business_date, "update", fields, payload.submitted_by)
+
+            _log_history(
+                action="Updated",
+                store=store,
+                business_date=business_date,
+                fields_snapshot=updated.get("fields", {}),
+                submitted_by=payload.submitted_by,
+                record_id=record_id,
+                lock_status=updated.get("fields", {}).get("Lock Status"),
+                changed_fields=list(fields.keys()),
+            )
+
             print(f"🔁 Updated and locked record for {store} on {business_date}")
             return {
                 "status": "updated_locked",
@@ -203,7 +229,18 @@ def upsert_closing(payload: ClosingCreate):
         # --- New Record (Create) ---
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
-        _log_history(store, business_date, "create", fields, payload.submitted_by)
+
+        _log_history(
+            action="Created",
+            store=store,
+            business_date=business_date,
+            fields_snapshot=created.get("fields", {}),
+            submitted_by=payload.submitted_by,
+            record_id=created.get("id"),
+            lock_status=created.get("fields", {}).get("Lock Status"),
+            changed_fields=list(fields.keys()),
+        )
+
         print(f"🆕 Created and locked new record for {store} on {business_date}")
         return {
             "status": "created_locked",
@@ -248,6 +285,18 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
             record_id,
             {"Lock Status": "Unlocked", "Unlocked At": datetime.now().isoformat()},
         )
+
+        _log_history(
+            action="Unlocked",
+            store=updated.get("fields", {}).get("Store", "Unknown"),
+            business_date=updated.get("fields", {}).get("Date", ""),
+            fields_snapshot=updated.get("fields", {}),
+            submitted_by="Manager PIN",
+            record_id=record_id,
+            lock_status="Unlocked",
+            changed_fields=["Lock Status", "Unlocked At"],
+        )
+
         print(f"🔓 Record {record_id} unlocked by manager.")
         return {
             "status": "unlocked",
@@ -319,6 +368,29 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+
+
+# ---------- History Read (Admin View) ----------
+@app.get("/history")
+def get_history(business_date: Optional[str] = Query(None), store: Optional[str] = Query(None), limit: int = Query(100)):
+    """Fetch history entries by date and/or store for admin view."""
+    try:
+        table = _airtable_table(HISTORY_TABLE)
+        formula = _airtable_filter_formula(business_date, store)
+        records = table.all(max_records=limit, formula=formula)
+        return {
+            "count": len(records),
+            "records": [
+                {
+                    "id": r.get("id"),
+                    "fields": r.get("fields", {}),
+                }
+                for r in records
+            ],
+        }
+    except Exception as e:
+        print("❌ Error fetching history:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------- Entrypoint ----------
