@@ -112,12 +112,17 @@ def airtable_test():
 
 # ---------- Hybrid History Logger ----------
 def _safe_serialize(obj):
-    """Safely convert datetime/date and other non-serializable types to strings."""
+    """Recursively convert datetime/date objects and nested dicts/lists to JSON-safe formats."""
     if isinstance(obj, (datetime, dt_date)):
         return obj.isoformat()
-    if isinstance(obj, (dict, list, tuple)):
-        return json.loads(json.dumps(obj, default=_safe_serialize))
-    return obj
+    elif isinstance(obj, dict):
+        return {k: _safe_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_safe_serialize(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_safe_serialize(v) for v in obj)
+    else:
+        return obj
 
 def _log_history(
     *,
@@ -136,9 +141,10 @@ def _log_history(
         changed_csv = ", ".join(changed_fields) if changed_fields else None
 
         safe_snapshot = _safe_serialize(fields_snapshot)
+        print(f"🧩 Serialized snapshot type: {type(safe_snapshot)}")
 
         table.create({
-            "Date": business_date,
+            "Date": str(business_date),
             "Store": store,
             "Action": action,
             "Changed By": submitted_by,
@@ -148,11 +154,10 @@ def _log_history(
             "Changed Fields": changed_csv,
             "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
         })
+
         print(f"🧾 Logged {action} for {store} on {business_date}")
     except Exception as e:
         print(f"⚠️ Failed to log history: {e}")
-
-
 
 # ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
 @app.post("/closings")
