@@ -17,7 +17,7 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.0")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.1")
 
 origins = [
     "http://localhost:5000",
@@ -142,122 +142,71 @@ def _log_history(
         print(f"⚠️ Failed to log history: {e}")
 
 
-        # ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
-        @app.post("/closings")
-        def upsert_closing(payload: ClosingCreate):
-            """Create or update a daily closing record in Airtable (upsert by store + date) with validation and history logging."""
-            try:
-                print("📩 Incoming payload received:", json.dumps(payload.dict(), indent=2))
+# ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
+@app.post("/closings")
+def upsert_closing(payload: ClosingCreate):
+    """Create or update a daily closing record in Airtable (upsert by store + date) with validation and history logging."""
+    try:
+        print("📩 Incoming payload received:", json.dumps(payload.dict(), indent=2))
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        store = payload.store.strip()
+        business_date = payload.business_date.isoformat()
+        print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
 
-                table = _airtable_table(DAILY_CLOSINGS_TABLE)
-                store = payload.store.strip()
-                business_date = payload.business_date.isoformat()
-                print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
+        # --- Validation ---
+        if payload.total_sales < 0 or payload.net_sales < 0:
+            raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
+        if payload.total_sales < payload.net_sales:
+            raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
-                # --- Validation ---
-                if payload.total_sales < 0 or payload.net_sales < 0:
-                    raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
-                if payload.total_sales < payload.net_sales:
-                    raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
+        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "''")
+        formula = (
+            f"AND("
+            f'{{Store}}="{clean_store}", '
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
+            f")"
+        )
 
-                clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "''")
-                formula = (
-                    f"AND("
-                    f'{{Store}}="{clean_store}", '
-                    f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-                    f")"
-                )
+        print(f"🔍 Airtable query formula: {formula}")
+        existing = table.all(formula=formula, max_records=1)
+        print(f"📊 Existing records found: {len(existing)}")
 
-                print(f"🔍 Airtable query formula: {formula}")
-                existing = table.all(formula=formula, max_records=1)
-                print(f"📊 Existing records found: {len(existing)}")
+        fields = {
+            "Date": business_date,
+            "Store": store,
+            "Total Sales": payload.total_sales,
+            "Net Sales": payload.net_sales,
+            "Cash Payments": payload.cash_payments,
+            "Card Payments": payload.card_payments,
+            "Digital Payments": payload.digital_payments,
+            "Grab Payments": payload.grab_payments,
+            "Bank Transfer Payments": payload.bank_transfer_payments,
+            "Voucher Payments": payload.voucher_payments,
+            "Marketing Expenses": payload.marketing_expenses,
+            "Actual Cash Counted": payload.actual_cash_counted,
+            "Cash Float": payload.cash_float,
+            "Kitchen Budget": payload.kitchen_budget,
+            "Bar Budget": payload.bar_budget,
+            "Non Food Budget": payload.non_food_budget,
+            "Staff Meal Budget": payload.staff_meal_budget,
+            "Submitted By": payload.submitted_by,
+            "Last Updated By": payload.submitted_by,
+            "Last Updated At": datetime.now().isoformat(),
+        }
 
-                fields = {
-                    "Date": business_date,
-                    "Store": store,
-                    "Total Sales": payload.total_sales,
-                    "Net Sales": payload.net_sales,
-                    "Cash Payments": payload.cash_payments,
-                    "Card Payments": payload.card_payments,
-                    "Digital Payments": payload.digital_payments,
-                    "Grab Payments": payload.grab_payments,
-                    "Bank Transfer Payments": payload.bank_transfer_payments,
-                    "Voucher Payments": payload.voucher_payments,
-                    "Marketing Expenses": payload.marketing_expenses,
-                    "Actual Cash Counted": payload.actual_cash_counted,
-                    "Cash Float": payload.cash_float,
-                    "Kitchen Budget": payload.kitchen_budget,
-                    "Bar Budget": payload.bar_budget,
-                    "Non Food Budget": payload.non_food_budget,
-                    "Staff Meal Budget": payload.staff_meal_budget,
-                    "Submitted By": payload.submitted_by,
-                    "Last Updated By": payload.submitted_by,
-                    "Last Updated At": datetime.now().isoformat(),
-                }
-
-                fields = {k: v for k, v in fields.items() if v is not None}
-                print(f"🧮 Fields prepared for upsert ({len(fields)} keys): {list(fields.keys())}")
-
-                # --- Existing Record (Update) ---
-                if existing:
-                    print("🔁 Found existing record — proceeding with update.")
-                    record = existing[0]
-                    record_id = record["id"]
-                    current_lock = record["fields"].get("Lock Status", "Unlocked")
-
-                    print(f"🔒 Current lock status: {current_lock}")
-                    if current_lock in ["Locked", "Verified"]:
-                        print("⚠️ Record is locked or verified — cannot modify.")
-                        raise HTTPException(
-                            status_code=403,
-                            detail=f"Record for {store} on {business_date} is locked and cannot be modified.",
-                        )
-
-                    fields["Lock Status"] = "Locked"
-                    updated = table.update(record_id, fields)
-                    print(f"✅ Airtable record updated successfully: {record_id}")
-
-                    print("🗒 Logging update action to history...")
-                    _log_history(store, business_date, "update", fields, payload.submitted_by)
-                    print("✅ History log completed.")
-
-                    return {
-                        "status": "updated_locked",
-                        "id": record_id,
-                        "lock_status": updated.get("fields", {}).get("Lock Status", "Locked"),
-                        "fields": updated.get("fields", {}),
-                    }
-
-                # --- New Record (Create) ---
-                print("🆕 No existing record — creating a new one.")
-                fields["Lock Status"] = "Locked"
-                created = table.create(fields)
-                print(f"✅ Airtable record created successfully: {created.get('id')}")
-
-                print("🗒 Logging create action to history...")
-                _log_history(store, business_date, "create", fields, payload.submitted_by)
-                print("✅ History log completed.")
-
-                return {
-                    "status": "created_locked",
-                    "id": created.get("id"),
-                    "lock_status": created.get("fields", {}).get("Lock Status", "Locked"),
-                    "fields": created.get("fields", {}),
-                }
-
-            except HTTPException:
-                raise
-            except Exception as e:
-                print("❌ Error during upsert:", e)
-                raise HTTPException(status_code=500, detail=str(e))
+        fields = {k: v for k, v in fields.items() if v is not None}
+        print(f"🧮 Fields prepared for upsert ({len(fields)} keys): {list(fields.keys())}")
 
         # --- Existing Record (Update) ---
         if existing:
+            print("🔁 Found existing record — proceeding with update.")
             record = existing[0]
             record_id = record["id"]
             current_lock = record["fields"].get("Lock Status", "Unlocked")
 
+            print(f"🔒 Current lock status: {current_lock}")
             if current_lock in ["Locked", "Verified"]:
+                print("⚠️ Record is locked or verified — cannot modify.")
                 raise HTTPException(
                     status_code=403,
                     detail=f"Record for {store} on {business_date} is locked and cannot be modified.",
@@ -265,7 +214,9 @@ def _log_history(
 
             fields["Lock Status"] = "Locked"
             updated = table.update(record_id, fields)
+            print(f"✅ Airtable record updated successfully: {record_id}")
 
+            print("🗒 Logging update action to history...")
             _log_history(
                 action="Updated",
                 store=store,
@@ -276,8 +227,8 @@ def _log_history(
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=list(fields.keys()),
             )
+            print("✅ History log completed.")
 
-            print(f"🔁 Updated and locked record for {store} on {business_date}")
             return {
                 "status": "updated_locked",
                 "id": record_id,
@@ -286,9 +237,12 @@ def _log_history(
             }
 
         # --- New Record (Create) ---
+        print("🆕 No existing record — creating a new one.")
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
+        print(f"✅ Airtable record created successfully: {created.get('id')}")
 
+        print("🗒 Logging create action to history...")
         _log_history(
             action="Created",
             store=store,
@@ -299,8 +253,8 @@ def _log_history(
             lock_status=created.get("fields", {}).get("Lock Status"),
             changed_fields=list(fields.keys()),
         )
+        print("✅ History log completed.")
 
-        print(f"🆕 Created and locked new record for {store} on {business_date}")
         return {
             "status": "created_locked",
             "id": created.get("id"),
@@ -428,6 +382,7 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         print("❌ Error in /closings/unique:", e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
+
 # ---------- History Read (Admin View) ----------
 @app.get("/history")
 def get_history(
@@ -444,7 +399,6 @@ def get_history(
         if business_date:
             clauses.append(f'{{Date}}="{business_date}"')
         if store:
-            # escape only double quotes; keep single quotes as-is (Airtable supports them in values)
             safe_store = store.replace('"', '\\"')
             clauses.append(f'{{Store}}="{safe_store}"')
 
@@ -458,6 +412,7 @@ def get_history(
     except Exception as e:
         print("❌ Error fetching history:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # ---------- Entrypoint ----------
 if __name__ == "__main__":
