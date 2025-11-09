@@ -164,10 +164,11 @@ def _log_history(
 def upsert_closing(payload: ClosingCreate):
     """Create or update a daily closing record in Airtable (upsert by store + date) with validation and history logging."""
     try:
-        print("📩 Incoming payload received:", json.dumps(payload.dict(), indent=2))
+        print("📩 Incoming payload received:", json.dumps(payload.dict(), default=str, indent=2))
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         store = payload.store.strip()
         business_date = payload.business_date.isoformat()
+        payload_dict = json.loads(json.dumps(payload.dict(), default=str))
         print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
 
         # --- Validation ---
