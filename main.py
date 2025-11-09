@@ -369,14 +369,24 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         print("❌ Error in /closings/unique:", e)
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
-
 # ---------- History Read (Admin View) ----------
 @app.get("/history")
 def get_history(business_date: Optional[str] = Query(None), store: Optional[str] = Query(None), limit: int = Query(100)):
     """Fetch history entries by date and/or store for admin view."""
     try:
         table = _airtable_table(HISTORY_TABLE)
-        formula = _airtable_filter_formula(business_date, store)
+
+        # Build a safer, simpler formula
+        clauses = []
+        if business_date:
+            clauses.append(f"{{Date}}='{business_date}'")
+        if store:
+            safe_store = store.replace("'", "''")
+            clauses.append(f"{{Store}}='{safe_store}'")
+
+        formula = "AND(" + ", ".join(clauses) + ")" if clauses else None
+
+        # Fetch records
         records = table.all(max_records=limit, formula=formula)
         return {
             "count": len(records),
@@ -391,7 +401,6 @@ def get_history(business_date: Optional[str] = Query(None), store: Optional[str]
     except Exception as e:
         print("❌ Error fetching history:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # ---------- Entrypoint ----------
 if __name__ == "__main__":
