@@ -142,7 +142,7 @@ def upsert_closing(payload: ClosingCreate):
         if payload.total_sales < payload.net_sales:
             raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
-        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "\\'")
+        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "''")
         formula = (
             f"AND("
             f"{{Store}}='{clean_store}', "
@@ -282,7 +282,7 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         clean_store = (
             store.replace("’", "'")
             .replace("‘", "'")
-            .replace("'", "\\'")
+            .replace("'", "''")
             .strip()
         )
         formula = (
