@@ -371,32 +371,30 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
 
 # ---------- History Read (Admin View) ----------
 @app.get("/history")
-def get_history(business_date: Optional[str] = Query(None), store: Optional[str] = Query(None), limit: int = Query(100)):
+def get_history(
+    business_date: Optional[str] = Query(None),
+    store: Optional[str] = Query(None),
+    limit: int = Query(100),
+):
     """Fetch history entries by date and/or store for admin view."""
     try:
         table = _airtable_table(HISTORY_TABLE)
 
-        # Build a safer, simpler formula
+        # Build formula using double-quoted strings (Airtable-safe)
         clauses = []
         if business_date:
-            clauses.append(f"{{Date}}='{business_date}'")
+            clauses.append(f'{{Date}}="{business_date}"')
         if store:
-            safe_store = store.replace("'", "''")
-            clauses.append(f"{{Store}}='{safe_store}'")
+            # escape only double quotes; keep single quotes as-is (Airtable supports them in values)
+            safe_store = store.replace('"', '\\"')
+            clauses.append(f'{{Store}}="{safe_store}"')
 
         formula = "AND(" + ", ".join(clauses) + ")" if clauses else None
 
-        # Fetch records
         records = table.all(max_records=limit, formula=formula)
         return {
             "count": len(records),
-            "records": [
-                {
-                    "id": r.get("id"),
-                    "fields": r.get("fields", {}),
-                }
-                for r in records
-            ],
+            "records": [{"id": r.get("id"), "fields": r.get("fields", {})} for r in records],
         }
     except Exception as e:
         print("❌ Error fetching history:", e)
