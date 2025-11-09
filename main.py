@@ -145,7 +145,7 @@ def upsert_closing(payload: ClosingCreate):
         clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "''")
         formula = (
             f"AND("
-            f"{{Store}}='{clean_store}', "
+            f'{{Store}}="{clean_store}", '
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
@@ -287,7 +287,7 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         )
         formula = (
             f"AND("
-            f"{{Store}}='{clean_store}', "
+            f'{{Store}}="{clean_store}", '
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
