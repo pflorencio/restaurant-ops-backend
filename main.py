@@ -189,7 +189,7 @@ def upsert_closing(payload: ClosingCreate):
         print(f"📊 Existing records found: {len(existing)}")
 
         fields = {
-            "Date": business_date.isoformat() if isinstance(business_date, (datetime, dt_date)) else business_date,
+            "Date": business_date,
             "Store": store,
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
@@ -214,6 +214,9 @@ def upsert_closing(payload: ClosingCreate):
         fields = {k: v for k, v in fields.items() if v is not None}
         print(f"🧮 Fields prepared for upsert ({len(fields)} keys): {list(fields.keys())}")
 
+        # 🔧 Universal safeguard for JSON serialization
+        fields = json.loads(json.dumps(fields, default=str))
+
         # --- Existing Record (Update) ---
         if existing:
             print("🔁 Found existing record — proceeding with update.")
@@ -230,6 +233,10 @@ def upsert_closing(payload: ClosingCreate):
                 )
 
             fields["Lock Status"] = "Locked"
+
+            # 🔧 Re-sanitize before sending to Airtable
+            fields = json.loads(json.dumps(fields, default=str))
+
             updated = table.update(record_id, fields)
             print(f"✅ Airtable record updated successfully: {record_id}")
 
@@ -256,6 +263,10 @@ def upsert_closing(payload: ClosingCreate):
         # --- New Record (Create) ---
         print("🆕 No existing record — creating a new one.")
         fields["Lock Status"] = "Locked"
+
+        # 🔧 Re-sanitize before sending to Airtable
+        fields = json.loads(json.dumps(fields, default=str))
+
         created = table.create(fields)
         print(f"✅ Airtable record created successfully: {created.get('id')}")
 
