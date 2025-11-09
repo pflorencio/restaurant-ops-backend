@@ -184,7 +184,7 @@ def upsert_closing(payload: ClosingCreate):
         print(f"📊 Existing records found: {len(existing)}")
 
         fields = {
-            "Date": business_date,
+            "Date": business_date.isoformat() if isinstance(business_date, (datetime, dt_date)) else business_date,
             "Store": store,
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
