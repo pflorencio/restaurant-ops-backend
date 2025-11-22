@@ -180,9 +180,9 @@ def upsert_closing(payload: ClosingCreate):
         normalized_store = (
             store.lower()
                  .strip()
-                 .replace("’", "'")
-                 .replace("‘", "'")
-                 .replace("'", "''")   # escape straight apostrophes for Airtable
+                 .replace("’", "")
+                 .replace("‘", "")
+                 .replace("'", "")
         )
         formula = (
             f"AND("
@@ -372,9 +372,9 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
         normalized_store = (
             store.lower()
                  .strip()
-                 .replace("’", "'")
-                 .replace("‘", "'")
-                 .replace("'", "''")   # escape straight apostrophes for Airtable
+                 .replace("’", "")
+                 .replace("‘", "")
+                 .replace("'", "")
         )
         clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
@@ -392,9 +392,9 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         normalized_store = (
             store.lower()
                  .strip()
-                 .replace("’", "'")
-                 .replace("‘", "'")
-                 .replace("'", "''")   # escape straight apostrophes for Airtable
+                 .replace("’", "")
+                 .replace("‘", "")
+                 .replace("'", "")
         )
         formula = (
             f"AND("
@@ -451,9 +451,9 @@ def get_history(
             normalized_store = (
                 store.lower()
                      .strip()
-                     .replace("’", "'")
-                     .replace("‘", "'")
-                     .replace("'", "''")   # escape straight apostrophes for Airtable
+                     .replace("’", "")
+                     .replace("‘", "")
+                     .replace("'", "")
             )
             clauses.append(f'{{Store Normalized}}="{normalized_store}"')
 
