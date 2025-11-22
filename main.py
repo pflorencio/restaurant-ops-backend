@@ -182,6 +182,7 @@ def upsert_closing(payload: ClosingCreate):
                  .strip()
                  .replace("’", "'")
                  .replace("‘", "'")
+                 .replace("'", "''")   # escape straight apostrophes for Airtable
         )
         formula = (
             f"AND("
@@ -373,6 +374,7 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
                  .strip()
                  .replace("’", "'")
                  .replace("‘", "'")
+                 .replace("'", "''")   # escape straight apostrophes for Airtable
         )
         clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
@@ -392,6 +394,7 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
                  .strip()
                  .replace("’", "'")
                  .replace("‘", "'")
+                 .replace("'", "''")   # escape straight apostrophes for Airtable
         )
         formula = (
             f"AND("
@@ -450,6 +453,7 @@ def get_history(
                      .strip()
                      .replace("’", "'")
                      .replace("‘", "'")
+                     .replace("'", "''")   # escape straight apostrophes for Airtable
             )
             clauses.append(f'{{Store Normalized}}="{normalized_store}"')
 
