@@ -52,7 +52,7 @@ def _airtable_table(table_name: str) -> Table:
     return Table(api_key, base_id, table_name)
 
 
-DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closings")
+DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closing")
 HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History")
 
 
@@ -177,10 +177,15 @@ def upsert_closing(payload: ClosingCreate):
         if payload.total_sales < payload.net_sales:
             raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
-        clean_store = store.replace("’", "'").replace("‘", "'").replace("'", "''")
+        normalized_store = (
+            store.lower()
+                 .strip()
+                 .replace("’", "'")
+                 .replace("‘", "'")
+        )
         formula = (
             f"AND("
-            f'{{Store}}="{clean_store}", '
+            f"{{Store Normalized}}='{normalized_store}', "
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
@@ -351,17 +356,29 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # ---------- Utility: Airtable Filter ----------
 def _airtable_filter_formula(business_date: Optional[str], store: Optional[str]) -> Optional[str]:
     clauses = []
+
+    # Date filter (unchanged)
     if business_date:
-        clauses.append(f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')")
+        clauses.append(
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
+        )
+
+    # Store filter (normalized)
     if store:
-        safe_store = store.replace("'", "''")
-        clauses.append(f"{{Store}}='{safe_store}'")
+        normalized_store = (
+            store.lower()
+                 .strip()
+                 .replace("’", "'")
+                 .replace("‘", "'")
+        )
+        clauses.append(f"{{Store Normalized}}='{normalized_store}'")
+
     if not clauses:
         return None
+
     return "AND(" + ",".join(clauses) + ")"
 
 
@@ -370,15 +387,15 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
 def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        clean_store = (
-            store.replace("’", "'")
-            .replace("‘", "'")
-            .replace("'", "''")
-            .strip()
+        normalized_store = (
+            store.lower()
+                 .strip()
+                 .replace("’", "'")
+                 .replace("‘", "'")
         )
         formula = (
             f"AND("
-            f'{{Store}}="{clean_store}", '
+            f"{{Store Normalized}}='{normalized_store}', "
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
             f")"
         )
@@ -428,8 +445,13 @@ def get_history(
         if business_date:
             clauses.append(f'{{Date}}="{business_date}"')
         if store:
-            safe_store = store.replace('"', '\\"')
-            clauses.append(f'{{Store}}="{safe_store}"')
+            normalized_store = (
+                store.lower()
+                     .strip()
+                     .replace("’", "'")
+                     .replace("‘", "'")
+            )
+            clauses.append(f'{{Store Normalized}}="{normalized_store}"')
 
         formula = "AND(" + ", ".join(clauses) + ")" if clauses else None
 
