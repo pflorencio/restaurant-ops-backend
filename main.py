@@ -2,7 +2,7 @@ import os
 import smtplib
 import json
 from email.message import EmailMessage
-from typing import Optional
+from typing import Optional, Any
 from datetime import date as dt_date, datetime
 from collections import defaultdict
 
@@ -17,7 +17,7 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.1")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.6.0")
 
 origins = [
     "http://localhost:5000",
@@ -33,6 +33,7 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
 
 @app.options("/{rest_of_path:path}")
 async def options_handler(request: Request, rest_of_path: str):
@@ -124,6 +125,7 @@ def _safe_serialize(obj):
     else:
         return obj
 
+
 def _log_history(
     *,
     action: str,
@@ -143,21 +145,24 @@ def _log_history(
         safe_snapshot = _safe_serialize(fields_snapshot)
         print(f"🧩 Serialized snapshot type: {type(safe_snapshot)}")
 
-        table.create({
-            "Date": str(business_date),
-            "Store": store,
-            "Action": action,
-            "Changed By": submitted_by,
-            "Timestamp": datetime.now().isoformat(),
-            "Record ID": record_id,
-            "Lock Status": lock_status,
-            "Changed Fields": changed_csv,
-            "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
-        })
+        table.create(
+            {
+                "Date": str(business_date),
+                "Store": store,
+                "Action": action,
+                "Changed By": submitted_by,
+                "Timestamp": datetime.now().isoformat(),
+                "Record ID": record_id,
+                "Lock Status": lock_status,
+                "Changed Fields": changed_csv,
+                "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
+            }
+        )
 
         print(f"🧾 Logged {action} for {store} on {business_date}")
     except Exception as e:
         print(f"⚠️ Failed to log history: {e}")
+
 
 # ---------- UPSERT (Create or Update, Prevent Duplicates) ----------
 @app.post("/closings")
@@ -172,17 +177,23 @@ def upsert_closing(payload: ClosingCreate):
         print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
 
         # --- Validation ---
-        if payload.total_sales < 0 or payload.net_sales < 0:
+        if payload.total_sales is not None and payload.total_sales < 0:
             raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
-        if payload.total_sales < payload.net_sales:
+        if payload.net_sales is not None and payload.net_sales < 0:
+            raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
+        if (
+            payload.total_sales is not None
+            and payload.net_sales is not None
+            and payload.total_sales < payload.net_sales
+        ):
             raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
         normalized_store = (
             store.lower()
-                 .strip()
-                 .replace("’", "")
-                 .replace("‘", "")
-                 .replace("'", "")
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", "")
         )
         formula = (
             f"AND("
@@ -357,6 +368,7 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+
 # ---------- Utility: Airtable Filter ----------
 def _airtable_filter_formula(business_date: Optional[str], store: Optional[str]) -> Optional[str]:
     clauses = []
@@ -371,10 +383,10 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
     if store:
         normalized_store = (
             store.lower()
-                 .strip()
-                 .replace("’", "")
-                 .replace("‘", "")
-                 .replace("'", "")
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", "")
         )
         clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
@@ -384,6 +396,30 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
     return "AND(" + ",".join(clauses) + ")"
 
 
+# ---------- New: List Closings for Dashboard ----------
+@app.get("/closings")
+def list_closings(
+    business_date: str = Query(..., description="Business date (YYYY-MM-DD)"),
+    store: Optional[str] = Query(None, description="Optional store name"),
+    limit: int = Query(100, ge=1, le=500),
+):
+    """
+    Manager view: fetch all daily closings for a business_date (and optional store).
+    """
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        formula = _airtable_filter_formula(business_date, store)
+        records = table.all(max_records=limit, formula=formula)
+
+        return {
+            "count": len(records),
+            "records": [{"id": r.get("id"), "fields": r.get("fields", {})} for r in records],
+        }
+    except Exception as e:
+        print("❌ Error in list_closings:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------- Unique Record Fetch (Prefill) ----------
 @app.get("/closings/unique")
 def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
@@ -391,10 +427,10 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         normalized_store = (
             store.lower()
-                 .strip()
-                 .replace("’", "")
-                 .replace("‘", "")
-                 .replace("'", "")
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", "")
         )
         formula = (
             f"AND("
@@ -432,6 +468,110 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
         return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
 
 
+# ---------- New: Get Single Closing (for auto-refresh) ----------
+@app.get("/closings/{record_id}")
+def get_closing(record_id: str = Path(..., description="Airtable record ID")):
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        record = table.get(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        return {
+            "id": record.get("id"),
+            "fields": record.get("fields", {}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in get_closing:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- New: Patch Closing (inline edits from Dashboard) ----------
+@app.patch("/closings/{record_id}")
+def patch_closing(record_id: str, payload: dict[str, Any]):
+    """
+    Generic partial update for a closing record.
+    Used by Dashboard inline edits (e.g., Total Sales, Variance, etc.).
+    """
+    try:
+        if not payload:
+            raise HTTPException(status_code=400, detail="Empty update payload")
+
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        updated = table.update(record_id, payload)
+
+        _log_history(
+            action="Patched",
+            store=updated.get("fields", {}).get("Store", "Unknown"),
+            business_date=updated.get("fields", {}).get("Date", ""),
+            fields_snapshot=updated.get("fields", {}),
+            submitted_by="Dashboard Inline Edit",
+            record_id=record_id,
+            lock_status=updated.get("fields", {}).get("Lock Status"),
+            changed_fields=list(payload.keys()),
+        )
+
+        return {
+            "status": "patched",
+            "id": record_id,
+            "fields": updated.get("fields", {}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in patch_closing:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+# ---------- New: Verify / Flag Closing ----------
+class VerifyPayload(BaseModel):
+    status: str
+    verified_by: Optional[str] = None
+
+
+@app.post("/closings/{record_id}/verify")
+def verify_closing(record_id: str, payload: VerifyPayload):
+    """
+    Mark a record as Verified / Flagged, set verifier + timestamp, and lock it.
+    """
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        now = datetime.now().isoformat()
+
+        fields_update = {
+            "Verified Status": payload.status,
+            "Verified By": payload.verified_by or "Manager",
+            "Verified At": now,
+            "Lock Status": "Verified" if payload.status.lower() == "verified" else "Locked",
+        }
+
+        updated = table.update(record_id, fields_update)
+
+        _log_history(
+            action="Verified",
+            store=updated.get("fields", {}).get("Store", "Unknown"),
+            business_date=updated.get("fields", {}).get("Date", ""),
+            fields_snapshot=updated.get("fields", {}),
+            submitted_by=payload.verified_by or "Manager",
+            record_id=record_id,
+            lock_status=updated.get("fields", {}).get("Lock Status"),
+            changed_fields=list(fields_update.keys()),
+        )
+
+        return {
+            "status": "verified",
+            "id": record_id,
+            "fields": updated.get("fields", {}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in verify_closing:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 # ---------- History Read (Admin View) ----------
 @app.get("/history")
 def get_history(
@@ -450,10 +590,10 @@ def get_history(
         if store:
             normalized_store = (
                 store.lower()
-                     .strip()
-                     .replace("’", "")
-                     .replace("‘", "")
-                     .replace("'", "")
+                .strip()
+                .replace("’", "")
+                .replace("‘", "")
+                .replace("'", "")
             )
             clauses.append(f'{{Store Normalized}}="{normalized_store}"')
 
@@ -469,9 +609,38 @@ def get_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------- New: Daily Summary (placeholder for now) ----------
+@app.get("/reports/daily-summary")
+def daily_summary(
+    business_date: str = Query(..., description="Business date (YYYY-MM-DD)"),
+    store: Optional[str] = Query(None, description="Optional store (for future filtering)"),
+):
+    """
+    Placeholder endpoint for management summary.
+
+    Frontend expects a JSON object with a `preview` field.
+    Later we can plug in OpenAI to generate the real summary.
+    """
+    message_lines = [
+        f"Management Summary for {business_date}",
+        "",
+        "AI-generated summary is not enabled yet.",
+        "Once configured, this section will show:",
+        "- Total sales and cash across all stores",
+        "- Variances and flagged records",
+        "- Key notes for management review",
+    ]
+    return {
+        "business_date": business_date,
+        "store": store,
+        "preview": "\n".join(message_lines),
+    }
+
+
 # ---------- Entrypoint ----------
 if __name__ == "__main__":
     import uvicorn
+
     port = int(os.environ.get("PORT", 8080))
     print(f"✅ Server starting on port {port}")
     uvicorn.run("main:app", host="0.0.0.0", port=port, log_level="info")
