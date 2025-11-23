@@ -47,14 +47,16 @@ async def options_handler(request: Request, rest_of_path: str):
     return response
 
 
-# ---------- Airtable Helpers ----------
+# ---------- Airtable Helpers (STRICT mode: IDs required) ----------
 def _airtable_table(table_key: str) -> Table:
     """
-    Create an Airtable Table instance safely using either:
-    - Airtable table ID (preferred)
-    - Table name (fallback)
+    Create an Airtable Table instance using STRICT ID-based resolution.
 
     table_key is the logical key, e.g. "daily_closing" or "history".
+
+    In STRICT MODE:
+    - We REQUIRE the table ID env var to be present.
+    - We still read the human-readable name env var for logging only.
     """
     base_id = os.getenv("AIRTABLE_BASE_ID")
     api_key = os.getenv("AIRTABLE_API_KEY")
@@ -62,41 +64,52 @@ def _airtable_table(table_key: str) -> Table:
     if not base_id or not api_key:
         raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
 
-    # Map logical keys to ENV pairs
-    table_map = {
-        "daily_closing": (
-            os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE_ID"),
-            os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closing"),
-        ),
-        "history": (
-            os.getenv("AIRTABLE_HISTORY_TABLE_ID"),
-            os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History"),
-        ),
+    # Map logical keys to ENV vars
+    table_configs = {
+        "daily_closing": {
+            "id_env": "AIRTABLE_DAILY_CLOSINGS_TABLE_ID",
+            "name_env": "AIRTABLE_DAILY_CLOSINGS_TABLE",
+            "default_name": "Daily Closing",
+        },
+        "history": {
+            "id_env": "AIRTABLE_HISTORY_TABLE_ID",
+            "name_env": "AIRTABLE_HISTORY_TABLE",
+            "default_name": "Daily Closing History",
+        },
     }
 
-    if table_key not in table_map:
+    if table_key not in table_configs:
         raise RuntimeError(f"Unknown table key: {table_key}")
 
-    table_id, table_name = table_map[table_key]
+    cfg = table_configs[table_key]
+    table_id = os.getenv(cfg["id_env"])
+    table_name = os.getenv(cfg["name_env"], cfg["default_name"])
 
-    # Prefer table ID (recommended by Airtable)
-    table_ref = table_id or table_name
-    return Table(api_key, base_id, table_ref)
+    if not table_id:
+        # STRICT MODE: do NOT fall back to table name
+        raise RuntimeError(
+            f"STRICT MODE: {cfg['id_env']} is not set. "
+            f"Please configure it in Render. Intended table name is '{table_name}'."
+        )
 
-# Logical keys (NOT table names — the helper resolves IDs vs names)
+    print(f"🔗 Using Airtable table '{table_name}' with ID {table_id} for key '{table_key}'")
+    return Table(api_key, base_id, table_id)
+
+
+# Logical keys (NOT table names — helper resolves IDs via env)
 DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
 
-# ---------- Multi-tenant Defaults (Option A) ----------
-# For now we run a single-tenant setup (your restaurants).
-# Later we can move tenant + store metadata into Supabase while keeping the same signature.
+# ---------- Multi-tenant Defaults (Option A for now) ----------
 DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo-tenant")
 
 
 def resolve_tenant_id(explicit: Optional[str]) -> str:
-    """Return a concrete tenant id for every request.
-    Today this just falls back to DEFAULT_TENANT_ID so existing clients do not need to send anything.
-    Later, when we add real auth, we can derive tenant_id from the user/session instead.
+    """
+    Return a concrete tenant id for every request.
+
+    Today this just falls back to DEFAULT_TENANT_ID so existing clients do not
+    need to send anything. Later we can derive tenant_id from auth/session.
     """
     return explicit or DEFAULT_TENANT_ID
 
@@ -142,6 +155,10 @@ def healthz():
 
 @app.get("/airtable/test")
 def airtable_test():
+    """
+    Simple connectivity check for a generic table (using AIRTABLE_TABLE_NAME).
+    This is separate from our strict-table-key helper.
+    """
     base_id = os.getenv("AIRTABLE_BASE_ID")
     api_key = os.getenv("AIRTABLE_API_KEY")
     table_name = os.getenv("AIRTABLE_TABLE_NAME")
@@ -160,17 +177,17 @@ def airtable_test():
 
 # ---------- Hybrid History Logger ----------
 def _safe_serialize(obj):
-  """Recursively convert datetime/date objects and nested dicts/lists to JSON-safe formats."""
-  if isinstance(obj, (datetime, dt_date)):
-      return obj.isoformat()
-  elif isinstance(obj, dict):
-      return {k: _safe_serialize(v) for k, v in obj.items()}
-  elif isinstance(obj, list):
-      return [_safe_serialize(v) for v in obj]
-  elif isinstance(obj, tuple):
-      return tuple(_safe_serialize(v) for v in obj)
-  else:
-      return obj
+    """Recursively convert datetime/date objects and nested dicts/lists to JSON-safe formats."""
+    if isinstance(obj, (datetime, dt_date)):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: _safe_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_safe_serialize(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_safe_serialize(v) for v in obj)
+    else:
+        return obj
 
 
 def _log_history(
@@ -189,17 +206,16 @@ def _log_history(
     Log a compact summary + full JSON snapshot of record changes.
 
     NOTE: `tenant_id` is optional for now. In the current single-tenant setup
-    we default it in the caller using `resolve_tenant_id(...)`. When we move
-    to Supabase-backed auth, we can derive it from the authenticated user
-    and still call this helper the same way.
+    we default it in the caller using `resolve_tenant_id(...)`.
     """
     try:
+        print(f"🗒 Attempting to log history for {store} on {business_date}...")
         table = _airtable_table(HISTORY_TABLE)
         changed_csv = ", ".join(changed_fields) if changed_fields else None
 
         safe_snapshot = _safe_serialize(fields_snapshot)
 
-        # 🔤 Normalize store name for history filters (Store Normalized)
+        # Normalize store name for filters
         normalized_store = (
             (store or "")
             .lower()
@@ -209,27 +225,28 @@ def _log_history(
             .replace("'", "")
         )
 
-        table.create(
-            {
-                "Date": str(business_date),
-                "Store": store,
-                "Store Normalized": normalized_store,
-                "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
-                "Action": action,
-                "Changed By": submitted_by,
-                "Timestamp": datetime.now().isoformat(),
-                "Record ID": record_id,
-                "Lock Status": lock_status,
-                "Changed Fields": changed_csv,
-                # Store full JSON snapshot as a string
-                "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
-            }
-        )
+        payload = {
+            "Date": str(business_date),
+            "Store": store,
+            "Store Normalized": normalized_store,
+            "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
+            "Action": action,
+            "Changed By": submitted_by,
+            "Timestamp": datetime.now().isoformat(),
+            "Record ID": record_id,
+            "Lock Status": lock_status,
+            "Changed Fields": changed_csv,
+            "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
+        }
 
+        print("🧾 History payload:", json.dumps(payload, indent=2))
+        created = table.create(payload)
         print(
-            f"🧾 Logged {action} for {store} on {business_date} (tenant={tenant_id or DEFAULT_TENANT_ID})"
+            f"✅ History logged (id={created.get('id')}) for {store} on {business_date} "
+            f"(tenant={tenant_id or DEFAULT_TENANT_ID}, action={action})"
         )
     except Exception as e:
+        # We don't crash the main flow, but we log clearly
         print(f"⚠️ Failed to log history: {e}")
 
 
@@ -245,10 +262,10 @@ def upsert_closing(payload: ClosingCreate):
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         store = payload.store.strip()
         business_date = payload.business_date.isoformat()
-        # Resolve tenant for this request (single-tenant for now, multi-tenant later)
+
+        # Resolve tenant
         tenant_id = resolve_tenant_id(getattr(payload, "tenant_id", None))
-        payload_dict = json.loads(json.dumps(payload.dict(), default=str))
-        print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
+        print(f"🧾 Processing upsert for Store={store}, Date={business_date}, Tenant={tenant_id}")
 
         # --- Validation ---
         if payload.total_sales < 0 or payload.net_sales < 0:
@@ -301,7 +318,7 @@ def upsert_closing(payload: ClosingCreate):
         fields = {k: v for k, v in fields.items() if v is not None}
         print(f"🧮 Fields prepared for upsert ({len(fields)} keys): {list(fields.keys())}")
 
-        # 🔧 Universal safeguard for JSON serialization
+        # Safeguard for JSON serialization
         fields = json.loads(json.dumps(fields, default=str))
 
         # --- Existing Record (Update) ---
@@ -321,9 +338,7 @@ def upsert_closing(payload: ClosingCreate):
 
             fields["Lock Status"] = "Locked"
 
-            # 🔧 Re-sanitize before sending to Airtable
             fields = json.loads(json.dumps(fields, default=str))
-
             updated = table.update(record_id, fields)
             print(f"✅ Airtable record updated successfully: {record_id}")
 
@@ -352,9 +367,7 @@ def upsert_closing(payload: ClosingCreate):
         print("🆕 No existing record — creating a new one.")
         fields["Lock Status"] = "Locked"
 
-        # 🔧 Re-sanitize before sending to Airtable
         fields = json.loads(json.dumps(fields, default=str))
-
         created = table.create(fields)
         print(f"✅ Airtable record created successfully: {created.get('id')}")
 
@@ -574,13 +587,7 @@ class ClosingUpdate(RootModel[dict]):
 @app.patch("/closings/{record_id}")
 def patch_closing(record_id: str, payload: ClosingUpdate):
     """
-    Update one or more numeric fields on a closing record.
-
-    Payload is a free-form dict so we can patch:
-        {
-          "Cash Payments": 12345,
-          "Marketing Expenses": 0
-        }
+    Update one or more fields on a closing record.
     """
     try:
         updates = payload.root or {}
@@ -594,18 +601,15 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         if not existing:
             raise HTTPException(status_code=404, detail="Record not found")
 
-        # Merge fields
+        # Merge fields (for logging only)
         fields = existing.get("fields", {})
         for k, v in updates.items():
             fields[k] = v
 
-        # Track changes list
         changed_keys = list(updates.keys())
 
-        # Persist to Airtable
         updated = table.update(record_id, updates)
 
-        # Try to log to history
         try:
             _log_history(
                 action="Patched",
@@ -645,16 +649,6 @@ def get_history(
 ):
     """
     Fetch history entries for admin view.
-
-    Option A (today):
-        - Single Airtable base for all tenants.
-        - `tenant_id` is optional, and we default to DEFAULT_TENANT_ID when not supplied.
-    Option B (later):
-        - We can enforce tenant scoping by always requiring/deriving tenant_id
-          and, if needed, moving history storage into Supabase.
-
-    NOTE: We now use IS_SAME + DATETIME_PARSE for the Date filter so this
-    matches Airtable's Date field correctly.
     """
     try:
         table = _airtable_table(HISTORY_TABLE)
@@ -676,13 +670,14 @@ def get_history(
             )
             clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
-        # Tenant filter (optional for now)
         if tenant_id:
             clauses.append(f'{{Tenant ID}}="{tenant_id}"')
 
         formula = "AND(" + ", ".join(clauses) + ")" if clauses else None
+        print(f"🔍 History query formula: {formula}")
 
         records = table.all(max_records=limit, formula=formula)
+        print(f"📜 History records fetched: {len(records)}")
         return {
             "count": len(records),
             "records": [
@@ -726,7 +721,6 @@ def verify_closing(payload: VerifyPayload):
 
         updated = table.update(record_id, update_fields)
 
-        # Log to history for audit trail
         try:
             _log_history(
                 action=f"Verification - {status}",
@@ -764,14 +758,10 @@ def daily_summary(
 ):
     """
     Very simple daily summary for management.
-
-    - Aggregates totals across all stores (or a single store if provided).
-    - Intended to be augmented later with AI-generated commentary.
     """
     try:
         closings_table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Build filter
         clauses = [
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
         ]
@@ -797,7 +787,6 @@ def daily_summary(
                 + (f" at {store}" if store else ""),
             }
 
-        # Aggregate
         agg = defaultdict(float)
         stores_seen = set()
 
