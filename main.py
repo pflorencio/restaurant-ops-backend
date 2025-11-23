@@ -2,7 +2,7 @@ import os
 import smtplib
 import json
 from email.message import EmailMessage
-from typing import Optional, Any
+from typing import Optional
 from datetime import date as dt_date, datetime
 from collections import defaultdict
 
@@ -17,7 +17,7 @@ from pyairtable import Table
 load_dotenv()
 
 # ---------- App Initialization ----------
-app = FastAPI(title="Daily Sales & Cash Management API", version="0.6.0")
+app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.1")
 
 origins = [
     "http://localhost:5000",
@@ -39,7 +39,9 @@ app.add_middleware(
 async def options_handler(request: Request, rest_of_path: str):
     response = JSONResponse({"ok": True})
     response.headers["Access-Control-Allow-Origin"] = "*"
-    response.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers[
+        "Access-Control-Allow-Methods"
+    ] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "Authorization, Content-Type"
     return response
 
@@ -55,6 +57,19 @@ def _airtable_table(table_name: str) -> Table:
 
 DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closing")
 HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History")
+
+# ---------- Multi-tenant Defaults (Option A) ----------
+# For now we run a single-tenant setup (your restaurants).
+# Later we can move tenant + store metadata into Supabase while keeping the same signature.
+DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo-tenant")
+
+
+def resolve_tenant_id(explicit: Optional[str]) -> str:
+    """Return a concrete tenant id for every request.
+    Today this just falls back to DEFAULT_TENANT_ID so existing clients do not need to send anything.
+    Later, when we add real auth, we can derive tenant_id from the user/session instead.
+    """
+    return explicit or DEFAULT_TENANT_ID
 
 
 # ---------- Models ----------
@@ -80,6 +95,7 @@ class ClosingCreate(BaseModel):
     total_budgets: Optional[float] = 0.0
     cash_for_deposit: Optional[float] = 0.0
     transfer_needed: Optional[float] = 0.0
+    tenant_id: Optional[str] = None
     attachments: Optional[str] = None
     submitted_by: Optional[str] = None
 
@@ -101,7 +117,9 @@ def airtable_test():
     api_key = os.getenv("AIRTABLE_API_KEY")
     table_name = os.getenv("AIRTABLE_TABLE_NAME")
     if not (base_id and api_key and table_name):
-        return {"error": "Missing one or more env vars: AIRTABLE_BASE_ID, AIRTABLE_API_KEY, AIRTABLE_TABLE_NAME"}
+        return {
+            "error": "Missing one or more env vars: AIRTABLE_BASE_ID, AIRTABLE_API_KEY, AIRTABLE_TABLE_NAME"
+        }
 
     try:
         table = Table(api_key, base_id, table_name)
@@ -132,34 +150,56 @@ def _log_history(
     store: str,
     business_date: str,
     fields_snapshot: dict,
-    submitted_by: str = None,
-    record_id: str = None,
-    lock_status: str = None,
+    submitted_by: Optional[str] = None,
+    record_id: Optional[str] = None,
+    lock_status: Optional[str] = None,
     changed_fields: Optional[list[str]] = None,
+    tenant_id: Optional[str] = None,
 ):
-    """Logs both summary + full JSON snapshot of record changes."""
+    """
+    Log a compact summary + full JSON snapshot of record changes.
+
+    NOTE: `tenant_id` is optional for now. In the current single-tenant setup
+    we default it in the caller using `resolve_tenant_id(...)`. When we move
+    to Supabase-backed auth, we can derive it from the authenticated user
+    and still call this helper the same way.
+    """
     try:
         table = _airtable_table(HISTORY_TABLE)
         changed_csv = ", ".join(changed_fields) if changed_fields else None
 
         safe_snapshot = _safe_serialize(fields_snapshot)
-        print(f"🧩 Serialized snapshot type: {type(safe_snapshot)}")
+
+        # 🔤 Normalize store name for history filters (Store Normalized)
+        normalized_store = (
+            (store or "")
+            .lower()
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", "")
+        )
 
         table.create(
             {
                 "Date": str(business_date),
                 "Store": store,
+                "Store Normalized": normalized_store,
+                "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
                 "Action": action,
                 "Changed By": submitted_by,
                 "Timestamp": datetime.now().isoformat(),
                 "Record ID": record_id,
                 "Lock Status": lock_status,
                 "Changed Fields": changed_csv,
+                # Store full JSON snapshot as a string
                 "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
             }
         )
 
-        print(f"🧾 Logged {action} for {store} on {business_date}")
+        print(
+            f"🧾 Logged {action} for {store} on {business_date} (tenant={tenant_id or DEFAULT_TENANT_ID})"
+        )
     except Exception as e:
         print(f"⚠️ Failed to log history: {e}")
 
@@ -169,31 +209,30 @@ def _log_history(
 def upsert_closing(payload: ClosingCreate):
     """Create or update a daily closing record in Airtable (upsert by store + date) with validation and history logging."""
     try:
-        print("📩 Incoming payload received:", json.dumps(payload.dict(), default=str, indent=2))
+        print(
+            "📩 Incoming payload received:",
+            json.dumps(payload.dict(), default=str, indent=2),
+        )
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         store = payload.store.strip()
         business_date = payload.business_date.isoformat()
+        # Resolve tenant for this request (single-tenant for now, multi-tenant later)
+        tenant_id = resolve_tenant_id(getattr(payload, "tenant_id", None))
         payload_dict = json.loads(json.dumps(payload.dict(), default=str))
         print(f"🧾 Processing upsert for Store={store}, Date={business_date}")
 
         # --- Validation ---
-        if payload.total_sales is not None and payload.total_sales < 0:
-            raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
-        if payload.net_sales is not None and payload.net_sales < 0:
-            raise HTTPException(status_code=400, detail="Sales values cannot be negative.")
-        if (
-            payload.total_sales is not None
-            and payload.net_sales is not None
-            and payload.total_sales < payload.net_sales
-        ):
-            raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
+        if payload.total_sales < 0 or payload.net_sales < 0:
+            raise HTTPException(
+                status_code=400, detail="Sales values cannot be negative."
+            )
+        if payload.total_sales < payload.net_sales:
+            raise HTTPException(
+                status_code=400, detail="Net sales cannot exceed total sales."
+            )
 
         normalized_store = (
-            store.lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", "")
+            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
         )
         formula = (
             f"AND("
@@ -209,6 +248,7 @@ def upsert_closing(payload: ClosingCreate):
         fields = {
             "Date": business_date,
             "Store": store,
+            "Tenant ID": tenant_id,
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
             "Cash Payments": payload.cash_payments,
@@ -268,6 +308,7 @@ def upsert_closing(payload: ClosingCreate):
                 record_id=record_id,
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=list(fields.keys()),
+                tenant_id=tenant_id,
             )
             print("✅ History log completed.")
 
@@ -298,6 +339,7 @@ def upsert_closing(payload: ClosingCreate):
             record_id=created.get("id"),
             lock_status=created.get("fields", {}).get("Lock Status"),
             changed_fields=list(fields.keys()),
+            tenant_id=tenant_id,
         )
         print("✅ History log completed.")
 
@@ -334,7 +376,9 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
     try:
         manager_pin = os.getenv("MANAGER_PIN")
         if not manager_pin:
-            raise HTTPException(status_code=500, detail="MANAGER_PIN not configured on server")
+            raise HTTPException(
+                status_code=500, detail="MANAGER_PIN not configured on server"
+            )
 
         if not _constant_time_equal(payload.pin or "", manager_pin):
             raise HTTPException(status_code=401, detail="Invalid manager PIN")
@@ -354,6 +398,7 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
             record_id=record_id,
             lock_status="Unlocked",
             changed_fields=["Lock Status", "Unlocked At"],
+            tenant_id=updated.get("fields", {}).get("Tenant ID") or DEFAULT_TENANT_ID,
         )
 
         print(f"🔓 Record {record_id} unlocked by manager.")
@@ -370,10 +415,12 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
 
 
 # ---------- Utility: Airtable Filter ----------
-def _airtable_filter_formula(business_date: Optional[str], store: Optional[str]) -> Optional[str]:
+def _airtable_filter_formula(
+    business_date: Optional[str], store: Optional[str]
+) -> Optional[str]:
     clauses = []
 
-    # Date filter (unchanged)
+    # Date filter
     if business_date:
         clauses.append(
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
@@ -382,11 +429,7 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
     # Store filter (normalized)
     if store:
         normalized_store = (
-            store.lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", "")
+            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
         )
         clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
@@ -396,27 +439,25 @@ def _airtable_filter_formula(business_date: Optional[str], store: Optional[str])
     return "AND(" + ",".join(clauses) + ")"
 
 
-# ---------- New: List Closings for Dashboard ----------
-@app.get("/closings")
-def list_closings(
-    business_date: str = Query(..., description="Business date (YYYY-MM-DD)"),
-    store: Optional[str] = Query(None, description="Optional store name"),
-    limit: int = Query(100, ge=1, le=500),
+# --- Single record fetch by ID (used by Cashier auto-refresh) ---
+@app.get("/closings/{record_id}")
+def get_closing_by_id(
+    record_id: str = Path(..., description="Airtable record ID for the closing")
 ):
-    """
-    Manager view: fetch all daily closings for a business_date (and optional store).
-    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        formula = _airtable_filter_formula(business_date, store)
-        records = table.all(max_records=limit, formula=formula)
+        record = table.get(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
 
         return {
-            "count": len(records),
-            "records": [{"id": r.get("id"), "fields": r.get("fields", {})} for r in records],
+            "id": record.get("id"),
+            "fields": record.get("fields", {}),
         }
+    except HTTPException:
+        raise
     except Exception as e:
-        print("❌ Error in list_closings:", e)
+        print("❌ Error in get_closing_by_id:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -426,11 +467,7 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         normalized_store = (
-            store.lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", "")
+            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
         )
         formula = (
             f"AND("
@@ -465,110 +502,104 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
 
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
-        return JSONResponse(status_code=500, content={"status": "error", "message": str(e)})
+        return JSONResponse(
+            status_code=500, content={"status": "error", "message": str(e)}
+        )
 
 
-# ---------- New: Get Single Closing (for auto-refresh) ----------
-@app.get("/closings/{record_id}")
-def get_closing(record_id: str = Path(..., description="Airtable record ID")):
+# ---------- Admin List: /closings (with filters) ----------
+@app.get("/closings")
+def list_closings(
+    business_date: Optional[str] = Query(
+        None, description="Filter by business date YYYY-MM-DD"
+    ),
+    store: Optional[str] = Query(None, description="Filter by store name"),
+    limit: int = Query(50, description="Maximum records to return"),
+):
+    """
+    Lightweight admin endpoint used by the React dashboard to list closings
+    for a specific date (and optionally a store).
+    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record = table.get(record_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Record not found")
+
+        formula = _airtable_filter_formula(business_date, store)
+        records = table.all(max_records=limit, formula=formula)
 
         return {
-            "id": record.get("id"),
-            "fields": record.get("fields", {}),
+            "count": len(records),
+            "records": [
+                {"id": r.get("id"), "fields": r.get("fields", {})} for r in records
+            ],
         }
-    except HTTPException:
-        raise
     except Exception as e:
-        print("❌ Error in get_closing:", e)
+        print("❌ Error listing closings:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- New: Patch Closing (inline edits from Dashboard) ----------
+# ---------- Inline Update (PATCH /closings/{record_id}) ----------
+class ClosingUpdate(BaseModel):
+    __root__: dict
+
+
 @app.patch("/closings/{record_id}")
-def patch_closing(record_id: str, payload: dict[str, Any]):
+def patch_closing(record_id: str, payload: ClosingUpdate):
     """
-    Generic partial update for a closing record.
-    Used by Dashboard inline edits (e.g., Total Sales, Variance, etc.).
+    Update one or more numeric fields on a closing record.
+
+    Payload is a free-form dict so we can patch:
+        {
+          "Cash Payments": 12345,
+          "Marketing Expenses": 0
+        }
     """
     try:
-        if not payload:
-            raise HTTPException(status_code=400, detail="Empty update payload")
+        updates = payload.__root__ or {}
+        if not isinstance(updates, dict) or not updates:
+            raise HTTPException(status_code=400, detail="Payload must be a non-empty object")
 
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        updated = table.update(record_id, payload)
+        existing = table.get(record_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Record not found")
 
-        _log_history(
-            action="Patched",
-            store=updated.get("fields", {}).get("Store", "Unknown"),
-            business_date=updated.get("fields", {}).get("Date", ""),
-            fields_snapshot=updated.get("fields", {}),
-            submitted_by="Dashboard Inline Edit",
-            record_id=record_id,
-            lock_status=updated.get("fields", {}).get("Lock Status"),
-            changed_fields=list(payload.keys()),
-        )
+        # Merge fields
+        fields = existing.get("fields", {})
+        for k, v in updates.items():
+            fields[k] = v
+
+        # Track changes list
+        changed_keys = list(updates.keys())
+
+        # Persist to Airtable
+        updated = table.update(record_id, updates)
+
+        # Try to log to history
+        try:
+            _log_history(
+                action="Patched",
+                store=fields.get("Store", "Unknown"),
+                business_date=fields.get("Date", ""),
+                fields_snapshot=updated.get("fields", {}),
+                submitted_by=fields.get("Last Updated By"),
+                record_id=record_id,
+                lock_status=updated.get("fields", {}).get("Lock Status"),
+                changed_fields=changed_keys,
+                tenant_id=updated.get("fields", {}).get("Tenant ID") or DEFAULT_TENANT_ID,
+            )
+        except Exception as e:
+            print("⚠️ Failed to log patch history:", e)
 
         return {
             "status": "patched",
             "id": record_id,
             "fields": updated.get("fields", {}),
         }
+
     except HTTPException:
         raise
     except Exception as e:
         print("❌ Error in patch_closing:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
-# ---------- New: Verify / Flag Closing ----------
-class VerifyPayload(BaseModel):
-    status: str
-    verified_by: Optional[str] = None
-
-
-@app.post("/closings/{record_id}/verify")
-def verify_closing(record_id: str, payload: VerifyPayload):
-    """
-    Mark a record as Verified / Flagged, set verifier + timestamp, and lock it.
-    """
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        now = datetime.now().isoformat()
-
-        fields_update = {
-            "Verified Status": payload.status,
-            "Verified By": payload.verified_by or "Manager",
-            "Verified At": now,
-            "Lock Status": "Verified" if payload.status.lower() == "verified" else "Locked",
-        }
-
-        updated = table.update(record_id, fields_update)
-
-        _log_history(
-            action="Verified",
-            store=updated.get("fields", {}).get("Store", "Unknown"),
-            business_date=updated.get("fields", {}).get("Date", ""),
-            fields_snapshot=updated.get("fields", {}),
-            submitted_by=payload.verified_by or "Manager",
-            record_id=record_id,
-            lock_status=updated.get("fields", {}).get("Lock Status"),
-            changed_fields=list(fields_update.keys()),
-        )
-
-        return {
-            "status": "verified",
-            "id": record_id,
-            "fields": updated.get("fields", {}),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("❌ Error in verify_closing:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -577,16 +608,27 @@ def verify_closing(record_id: str, payload: VerifyPayload):
 def get_history(
     business_date: Optional[str] = Query(None),
     store: Optional[str] = Query(None),
+    tenant_id: Optional[str] = Query(None),
     limit: int = Query(100),
 ):
-    """Fetch history entries by date and/or store for admin view."""
+    """
+    Fetch history entries for admin view.
+
+    Option A (today):
+        - Single Airtable base for all tenants.
+        - `tenant_id` is optional, and we default to DEFAULT_TENANT_ID when not supplied.
+    Option B (later):
+        - We can enforce tenant scoping by always requiring/deriving tenant_id
+          and, if needed, moving history storage into Supabase.
+    """
     try:
         table = _airtable_table(HISTORY_TABLE)
 
-        # Build formula using double-quoted strings (Airtable-safe)
-        clauses = []
+        clauses: list[str] = []
+
         if business_date:
             clauses.append(f'{{Date}}="{business_date}"')
+
         if store:
             normalized_store = (
                 store.lower()
@@ -597,44 +639,196 @@ def get_history(
             )
             clauses.append(f'{{Store Normalized}}="{normalized_store}"')
 
+        # Tenant filter (optional for now)
+        if tenant_id:
+            clauses.append(f'{{Tenant ID}}="{tenant_id}"')
+
         formula = "AND(" + ", ".join(clauses) + ")" if clauses else None
 
         records = table.all(max_records=limit, formula=formula)
         return {
             "count": len(records),
-            "records": [{"id": r.get("id"), "fields": r.get("fields", {})} for r in records],
+            "records": [
+                {"id": r.get("id"), "fields": r.get("fields", {})}
+                for r in records
+            ],
         }
     except Exception as e:
         print("❌ Error fetching history:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-# ---------- New: Daily Summary (placeholder for now) ----------
+# ---------- Management Summary / Daily Report ----------
+class VerifyPayload(BaseModel):
+    record_id: str
+    status: str
+    verified_by: str
+
+
+@app.post("/verify")
+def verify_closing(payload: VerifyPayload):
+    """
+    Mark a closing record as Verified or Flagged, log history, and
+    leave the row otherwise unchanged.
+    """
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        record_id = payload.record_id
+        status = payload.status.strip().capitalize()  # "Verified" / "Flagged"
+
+        record = table.get(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        fields = record.get("fields", {})
+
+        update_fields = {
+            "Verified Status": status,
+            "Verified By": payload.verified_by,
+            "Verified At": datetime.now().isoformat(),
+        }
+
+        updated = table.update(record_id, update_fields)
+
+        # Log to history for audit trail
+        try:
+            _log_history(
+                action=f"Verification - {status}",
+                store=fields.get("Store", "Unknown"),
+                business_date=fields.get("Date", ""),
+                fields_snapshot=updated.get("fields", {}),
+                submitted_by=payload.verified_by,
+                record_id=record_id,
+                lock_status=updated.get("fields", {}).get("Lock Status"),
+                changed_fields=list(update_fields.keys()),
+                tenant_id=updated.get("fields", {}).get("Tenant ID") or DEFAULT_TENANT_ID,
+            )
+        except Exception as e:
+            print("⚠️ Failed to log verification history:", e)
+
+        return {
+            "status": "ok",
+            "record_id": record_id,
+            "verified_status": status,
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error verifying record:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
 @app.get("/reports/daily-summary")
 def daily_summary(
-    business_date: str = Query(..., description="Business date (YYYY-MM-DD)"),
-    store: Optional[str] = Query(None, description="Optional store (for future filtering)"),
+    business_date: str = Query(..., description="Business date YYYY-MM-DD"),
+    store: Optional[str] = Query(
+        None, description="Optional store filter, e.g. `Nonie's`"
+    ),
 ):
     """
-    Placeholder endpoint for management summary.
+    Very simple daily summary for management.
 
-    Frontend expects a JSON object with a `preview` field.
-    Later we can plug in OpenAI to generate the real summary.
+    - Aggregates totals across all stores (or a single store if provided).
+    - Intended to be augmented later with AI-generated commentary.
     """
-    message_lines = [
-        f"Management Summary for {business_date}",
-        "",
-        "AI-generated summary is not enabled yet.",
-        "Once configured, this section will show:",
-        "- Total sales and cash across all stores",
-        "- Variances and flagged records",
-        "- Key notes for management review",
-    ]
-    return {
-        "business_date": business_date,
-        "store": store,
-        "preview": "\n".join(message_lines),
-    }
+    try:
+        closings_table = _airtable_table(DAILY_CLOSINGS_TABLE)
+
+        # Build filter
+        clauses = [
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
+        ]
+
+        if store:
+            normalized_store = (
+                store.lower()
+                .strip()
+                .replace("’", "")
+                .replace("‘", "")
+                .replace("'", "")
+            )
+            clauses.append(f"{{Store Normalized}}='{normalized_store}'")
+
+        formula = "AND(" + ", ".join(clauses) + ")"
+
+        records = closings_table.all(formula=formula, max_records=100)
+        if not records:
+            return {
+                "business_date": business_date,
+                "store": store,
+                "preview": f"No closings found for {business_date}"
+                + (f" at {store}" if store else ""),
+            }
+
+        # Aggregate
+        agg = defaultdict(float)
+        stores_seen = set()
+
+        for r in records:
+            f = r.get("fields", {})
+            stores_seen.add(f.get("Store", "Unknown"))
+            for key in [
+                "Total Sales",
+                "Net Sales",
+                "Cash Payments",
+                "Card Payments",
+                "Digital Payments",
+                "Grab Payments",
+                "Voucher Payments",
+                "Bank Transfer Payments",
+                "Marketing Expenses",
+                "Actual Cash Counted",
+                "Cash Float",
+                "Kitchen Budget",
+                "Bar Budget",
+                "Non Food Budget",
+                "Staff Meal Budget",
+                "Cash for Deposit",
+                "Transfer Needed",
+            ]:
+                val = f.get(key)
+                if isinstance(val, (int, float)):
+                    agg[key] += float(val)
+
+        def peso(n: float) -> str:
+            return f"₱{n:,.0f}"
+
+        lines = []
+        lines.append(f"Management Summary for {business_date}")
+        if store:
+            lines.append(f"Store: {store}")
+        else:
+            joined = ", ".join(sorted(s for s in stores_seen if s != "Unknown")) or "N/A"
+            lines.append(f"Stores included: {joined}")
+
+        lines.append("")
+        lines.append(f"Total Sales: {peso(agg['Total Sales'])}")
+        lines.append(f"Net Sales: {peso(agg['Net Sales'])}")
+        lines.append(
+            "Cash + Digital + Card: "
+            f"{peso(agg['Cash Payments'] + agg['Card Payments'] + agg['Digital Payments'])}"
+        )
+        lines.append(f"Marketing Expenses: {peso(agg['Marketing Expenses'])}")
+        lines.append(
+            f"Cash for Deposit: {peso(agg['Cash for Deposit'])}, "
+            f"Transfer Needed: {peso(agg['Transfer Needed'])}"
+        )
+        lines.append("")
+        lines.append("AI-generated summary is not enabled yet.")
+        lines.append("Once configured, this section will show:")
+        lines.append("- Total sales and cash across all stores")
+        lines.append("- Variances and flagged records")
+        lines.append("- Key notes for management review")
+
+        return {
+            "business_date": business_date,
+            "store": store,
+            "preview": "\n".join(lines),
+        }
+
+    except Exception as e:
+        print("❌ Error in daily_summary:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 
 # ---------- Entrypoint ----------
