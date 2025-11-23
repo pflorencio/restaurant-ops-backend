@@ -12,6 +12,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 from dotenv import load_dotenv
 from pyairtable import Table
+from pydantic import RootModel
 
 # --- Load environment early ---
 load_dotenv()
@@ -538,9 +539,8 @@ def list_closings(
 
 
 # ---------- Inline Update (PATCH /closings/{record_id}) ----------
-class ClosingUpdate(BaseModel):
-    __root__: dict
-
+class ClosingUpdate(RootModel[dict]):
+    pass
 
 @app.patch("/closings/{record_id}")
 def patch_closing(record_id: str, payload: ClosingUpdate):
@@ -554,7 +554,7 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         }
     """
     try:
-        updates = payload.__root__ or {}
+        updates = payload.root or {}
         if not isinstance(updates, dict) or not updates:
             raise HTTPException(status_code=400, detail="Payload must be a non-empty object")
 
