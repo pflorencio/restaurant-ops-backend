@@ -48,16 +48,44 @@ async def options_handler(request: Request, rest_of_path: str):
 
 
 # ---------- Airtable Helpers ----------
-def _airtable_table(table_name: str) -> Table:
+def _airtable_table(table_key: str) -> Table:
+    """
+    Create an Airtable Table instance safely using either:
+    - Airtable table ID (preferred)
+    - Table name (fallback)
+
+    table_key is the logical key, e.g. "daily_closing" or "history".
+    """
     base_id = os.getenv("AIRTABLE_BASE_ID")
     api_key = os.getenv("AIRTABLE_API_KEY")
+
     if not base_id or not api_key:
         raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
-    return Table(api_key, base_id, table_name)
 
+    # Map logical keys to ENV pairs
+    table_map = {
+        "daily_closing": (
+            os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE_ID"),
+            os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closing"),
+        ),
+        "history": (
+            os.getenv("AIRTABLE_HISTORY_TABLE_ID"),
+            os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History"),
+        ),
+    }
 
-DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE", "Daily Closing")
-HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE", "Daily Closing History")
+    if table_key not in table_map:
+        raise RuntimeError(f"Unknown table key: {table_key}")
+
+    table_id, table_name = table_map[table_key]
+
+    # Prefer table ID (recommended by Airtable)
+    table_ref = table_id or table_name
+    return Table(api_key, base_id, table_ref)
+
+# Logical keys (NOT table names — the helper resolves IDs vs names)
+DAILY_CLOSINGS_TABLE = "daily_closing"
+HISTORY_TABLE = "history"
 
 # ---------- Multi-tenant Defaults (Option A) ----------
 # For now we run a single-tenant setup (your restaurants).
