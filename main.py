@@ -17,6 +17,12 @@ from pydantic import RootModel
 # --- Load environment early ---
 load_dotenv()
 
+print("🔎 ENV CHECK:")
+print("  HISTORY TABLE ID:", os.getenv("AIRTABLE_HISTORY_TABLE_ID"))
+print("  HISTORY TABLE NAME:", os.getenv("AIRTABLE_HISTORY_TABLE"))
+print("  DAILY ID:", os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE_ID"))
+print("  DAILY NAME:", os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE"))
+
 # ---------- App Initialization ----------
 app = FastAPI(title="Daily Sales & Cash Management API", version="0.5.1")
 
