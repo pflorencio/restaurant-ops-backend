@@ -132,17 +132,17 @@ def airtable_test():
 
 # ---------- Hybrid History Logger ----------
 def _safe_serialize(obj):
-    """Recursively convert datetime/date objects and nested dicts/lists to JSON-safe formats."""
-    if isinstance(obj, (datetime, dt_date)):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: _safe_serialize(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_safe_serialize(v) for v in obj]
-    elif isinstance(obj, tuple):
-        return tuple(_safe_serialize(v) for v in obj)
-    else:
-        return obj
+  """Recursively convert datetime/date objects and nested dicts/lists to JSON-safe formats."""
+  if isinstance(obj, (datetime, dt_date)):
+      return obj.isoformat()
+  elif isinstance(obj, dict):
+      return {k: _safe_serialize(v) for k, v in obj.items()}
+  elif isinstance(obj, list):
+      return [_safe_serialize(v) for v in obj]
+  elif isinstance(obj, tuple):
+      return tuple(_safe_serialize(v) for v in obj)
+  else:
+      return obj
 
 
 def _log_history(
@@ -542,6 +542,7 @@ def list_closings(
 class ClosingUpdate(RootModel[dict]):
     pass
 
+
 @app.patch("/closings/{record_id}")
 def patch_closing(record_id: str, payload: ClosingUpdate):
     """
@@ -556,7 +557,9 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
     try:
         updates = payload.root or {}
         if not isinstance(updates, dict) or not updates:
-            raise HTTPException(status_code=400, detail="Payload must be a non-empty object")
+            raise HTTPException(
+                status_code=400, detail="Payload must be a non-empty object"
+            )
 
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         existing = table.get(record_id)
@@ -585,7 +588,8 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
                 record_id=record_id,
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=changed_keys,
-                tenant_id=updated.get("fields", {}).get("Tenant ID") or DEFAULT_TENANT_ID,
+                tenant_id=updated.get("fields", {}).get("Tenant ID")
+                or DEFAULT_TENANT_ID,
             )
         except Exception as e:
             print("⚠️ Failed to log patch history:", e)
@@ -620,6 +624,9 @@ def get_history(
     Option B (later):
         - We can enforce tenant scoping by always requiring/deriving tenant_id
           and, if needed, moving history storage into Supabase.
+
+    NOTE: We now use IS_SAME + DATETIME_PARSE for the Date filter so this
+    matches Airtable's Date field correctly.
     """
     try:
         table = _airtable_table(HISTORY_TABLE)
@@ -627,7 +634,9 @@ def get_history(
         clauses: list[str] = []
 
         if business_date:
-            clauses.append(f'{{Date}}="{business_date}"')
+            clauses.append(
+                f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}','YYYY-MM-DD'), 'day')"
+            )
 
         if store:
             normalized_store = (
@@ -637,7 +646,7 @@ def get_history(
                 .replace("‘", "")
                 .replace("'", "")
             )
-            clauses.append(f'{{Store Normalized}}="{normalized_store}"')
+            clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
         # Tenant filter (optional for now)
         if tenant_id:
@@ -649,8 +658,7 @@ def get_history(
         return {
             "count": len(records),
             "records": [
-                {"id": r.get("id"), "fields": r.get("fields", {})}
-                for r in records
+                {"id": r.get("id"), "fields": r.get("fields", {})} for r in records
             ],
         }
     except Exception as e:
@@ -701,7 +709,8 @@ def verify_closing(payload: VerifyPayload):
                 record_id=record_id,
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=list(update_fields.keys()),
-                tenant_id=updated.get("fields", {}).get("Tenant ID") or DEFAULT_TENANT_ID,
+                tenant_id=updated.get("fields", {}).get("Tenant ID")
+                or DEFAULT_TENANT_ID,
             )
         except Exception as e:
             print("⚠️ Failed to log verification history:", e)
@@ -798,7 +807,9 @@ def daily_summary(
         if store:
             lines.append(f"Store: {store}")
         else:
-            joined = ", ".join(sorted(s for s in stores_seen if s != "Unknown")) or "N/A"
+            joined = (
+                ", ".join(sorted(s for s in stores_seen if s != "Unknown")) or "N/A"
+            )
             lines.append(f"Stores included: {joined}")
 
         lines.append("")
