@@ -486,29 +486,6 @@ def _airtable_filter_formula(
 
     return "AND(" + ",".join(clauses) + ")"
 
-
-# --- Single record fetch by ID (used by Cashier auto-refresh) ---
-@app.get("/closings/{record_id}")
-def get_closing_by_id(
-    record_id: str = Path(..., description="Airtable record ID for the closing")
-):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record = table.get(record_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Record not found")
-
-        return {
-            "id": record.get("id"),
-            "fields": record.get("fields", {}),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("❌ Error in get_closing_by_id:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
-
 # ---------- Unique Record Fetch (Prefill) ----------
 @app.get("/closings/unique")
 def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
@@ -554,6 +531,26 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
             status_code=500, content={"status": "error", "message": str(e)}
         )
 
+# --- Single record fetch by ID (used by Cashier auto-refresh) ---
+@app.get("/closings/{record_id}")
+def get_closing_by_id(
+    record_id: str = Path(..., description="Airtable record ID for the closing")
+):
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        record = table.get(record_id)
+        if not record:
+            raise HTTPException(status_code=404, detail="Record not found")
+
+        return {
+            "id": record.get("id"),
+            "fields": record.get("fields", {}),
+        }
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in get_closing_by_id:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ---------- Admin List: /closings (with filters) ----------
 @app.get("/closings")
