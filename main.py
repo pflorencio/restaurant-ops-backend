@@ -234,6 +234,36 @@ def _log_history(**kwargs):
 
 
 # -----------------------------------------------------------
+# 🛠️ CRITICAL FIX — CLEAN OUT READ-ONLY FIELDS
+# -----------------------------------------------------------
+def format_fields_for_airtable(payload: dict):
+    """
+    Removes formula, lookup, readonly, and auto fields.
+    Airtable will reject creation if any of these are included.
+    """
+    READ_ONLY_FIELDS = {
+        "Store Normalized",
+        "Submitted By Name",
+        "Variance Display",
+        "Cash for Deposit Display",
+        "Transfer Needed Display",
+        "Created Time",
+        "Last Modified Time",
+        "Record ID",
+    }
+
+    clean = {}
+    for key, value in payload.items():
+        if key in READ_ONLY_FIELDS:
+            continue
+        if value is None:
+            continue
+        clean[key] = value
+
+    return clean
+
+
+# -----------------------------------------------------------
 # 📌 UPSERT — Create or Update Closing
 # -----------------------------------------------------------
 @app.post("/closings")
@@ -280,7 +310,8 @@ def upsert_closing(payload: ClosingCreate):
             "Lock Status": "Locked",
         }
 
-        fields = {k: v for k, v in fields.items() if v is not None}
+        # ❗ Remove all computed/formula fields before sending to Airtable
+        fields = format_fields_for_airtable(fields)
 
         # Update existing
         if existing:
