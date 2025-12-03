@@ -31,6 +31,8 @@ origins = [
     "http://127.0.0.1:5000",
     "https://restaurant-ops-dashboard-pflorencio.replit.app",
     "https://restaurant-ops-backend.onrender.com",
+    "https://*.pike.replit.dev",
+    "https://*.replit.dev",
 ]
 
 app.add_middleware(
