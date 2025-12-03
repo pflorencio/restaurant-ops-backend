@@ -2,7 +2,7 @@ import os
 import smtplib
 import json
 from email.message import EmailMessage
-from typing import Optional
+from typing import Optional, List
 from datetime import date as dt_date, datetime
 from collections import defaultdict
 
@@ -149,6 +149,10 @@ class ClosingCreate(BaseModel):
     attachments: Optional[str] = None
     submitted_by: Optional[str] = None
 
+class CashierLoginRequest(BaseModel):
+    cashier_id: str
+    pin: str
+
 
 # ---------- Basic Routes ----------
 @app.get("/")
@@ -182,6 +186,105 @@ def airtable_test():
     except Exception as e:
         return {"error": str(e)}
 
+# ---------- Cashier Auth (List + PIN Login) ----------
+
+@app.get("/auth/cashiers")
+def list_cashiers():
+    """
+    Return all active cashiers for the login dropdown.
+    """
+    try:
+        base_id = os.getenv("AIRTABLE_BASE_ID")
+        api_key = os.getenv("AIRTABLE_API_KEY")
+        if not base_id or not api_key:
+            raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
+
+        table = Table(api_key, base_id, "Cashiers")
+        records = table.all(formula="{Active} = TRUE()", max_records=100)
+
+        result = []
+        for r in records:
+            fields = r.get("fields", {})
+            if not fields:
+                continue
+
+            store = fields.get("Store") or ""
+            normalized_store = (
+                store.lower()
+                .strip()
+                .replace("’", "")
+                .replace("‘", "")
+                .replace("'", "")
+            )
+
+            result.append(
+                {
+                    "cashier_id": fields.get("Cashier ID"),
+                    "name": fields.get("Name"),
+                    "store": store,
+                    "store_normalized": fields.get("Store Normalized")
+                    or normalized_store,
+                }
+            )
+
+        return result
+
+    except Exception as e:
+        print("❌ Error in /auth/cashiers:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/auth/cashier-login")
+def cashier_login(payload: CashierLoginRequest):
+    """
+    Validate a cashier by Cashier ID + PIN.
+    Returns cashier identity + store.
+    """
+    try:
+        base_id = os.getenv("AIRTABLE_BASE_ID")
+        api_key = os.getenv("AIRTABLE_API_KEY")
+        if not base_id or not api_key:
+            raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
+
+        table = Table(api_key, base_id, "Cashiers")
+
+        cid = payload.cashier_id.strip()
+        pin = payload.pin.strip()
+
+        formula = (
+            f"AND("
+            f"{{Cashier ID}} = '{cid}', "
+            f"{{PIN}} = '{pin}', "
+            f"{{Active}} = TRUE()"
+            f")"
+        )
+
+        records = table.all(formula=formula, max_records=1)
+        if not records:
+            raise HTTPException(status_code=401, detail="Invalid PIN or cashier ID")
+
+        fields = records[0].get("fields", {})
+        store = fields.get("Store") or ""
+        normalized_store = (
+            store.lower()
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", "")
+        )
+
+        return {
+            "cashier_id": fields.get("Cashier ID"),
+            "name": fields.get("Name"),
+            "store": store,
+            "store_normalized": fields.get("Store Normalized") or normalized_store,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in /auth/cashier-login:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # ---------- Hybrid History Logger ----------
 def _safe_serialize(obj):
