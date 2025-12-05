@@ -209,23 +209,41 @@ def airtable_test():
 @app.get("/stores")
 async def list_stores():
     """
-    Returns: [
-      { "id": "recXXXX", "name": "Nonie's" },
-      { "id": "recYYYY", "name": "Muchos" },
-      ...
+    Return all active stores from Airtable:
+    [
+        { "id": "recXXXX", "name": "Nonie's" },
+        { "id": "recYYYY", "name": "Muchos" },
+        ...
     ]
     """
-    table = AIRTABLE_STORES  # Your Airtable base/table reference
+    import requests
 
-    records = table.all()
+    url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Stores"
+    headers = {
+        "Authorization": f"Bearer {AIRTABLE_API_KEY}"
+    }
+
+    try:
+        r = requests.get(url, headers=headers)
+        r.raise_for_status()
+        data = r.json()
+    except Exception as e:
+        print("🔥 ERROR FETCHING STORES:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch stores")
 
     stores = []
-    for rec in records:
+
+    for rec in data.get("records", []):
         fields = rec.get("fields", {})
-        if fields.get("Status", "").lower() == "active":
+        status = fields.get("Status", "")
+
+        if isinstance(status, list):
+            status = status[0]  # Airtable single-select sometimes returns a list
+
+        if str(status).lower() == "active":
             stores.append({
                 "id": rec.get("id"),
-                "name": fields.get("Store")
+                "name": fields.get("Store", "")
             })
 
     return stores
