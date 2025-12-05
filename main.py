@@ -203,6 +203,32 @@ def airtable_test():
     except Exception as e:
         return {"error": str(e)}
 
+# ---------------------------------------------------------
+# GET /stores  →  List all active stores
+# ---------------------------------------------------------
+@app.get("/stores")
+async def list_stores():
+    """
+    Returns: [
+      { "id": "recXXXX", "name": "Nonie's" },
+      { "id": "recYYYY", "name": "Muchos" },
+      ...
+    ]
+    """
+    table = AIRTABLE_STORES  # Your Airtable base/table reference
+
+    records = table.all()
+
+    stores = []
+    for rec in records:
+        fields = rec.get("fields", {})
+        if fields.get("Status", "").lower() == "active":
+            stores.append({
+                "id": rec.get("id"),
+                "name": fields.get("Store")
+            })
+
+    return stores
 
 # -----------------------------------------------------------
 # 🔐 AUTH — Users List + Login (Updated for NEW Users table)
@@ -334,6 +360,87 @@ def user_login(payload: UserLoginRequest):
         print("❌ Error in /auth/user-login:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+# ------------------------------------------------------------
+# ⭐ ADMIN USER MANAGEMENT (Update Role, Active, Store)
+# ------------------------------------------------------------
+@app.patch("/admin/users/{user_id}")
+async def update_user(user_id: str, payload: dict):
+    """
+    Admin update endpoint:
+    Allows editing:
+    - Role
+    - Active (true/false)
+    - Store (linked single record)
+    """
+
+    update_fields = {}
+
+    # Role change
+    if "role" in payload:
+        update_fields["Role"] = payload["role"]
+
+    # Activate / deactivate user
+    if "active" in payload:
+        update_fields["Active"] = bool(payload["active"])
+
+    # Change primary store
+    if "store_id" in payload:
+        update_fields["Store"] = (
+            [payload["store_id"]] if payload["store_id"] else []
+        )
+
+    try:
+        updated = AIRTABLE_USERS.update(user_id, update_fields)
+        return {"status": "ok", "fields": updated.get("fields", {})}
+    except Exception as e:
+        print("❌ Error updating user:", e)
+        raise HTTPException(status_code=500, detail="Failed to update user")
+
+# ---------------------------------------------------------
+# POST /admin/users  →  Create a new user
+# ---------------------------------------------------------
+@app.post("/admin/users")
+async def create_user(payload: dict):
+    """
+    Expected payload example:
+    {
+        "name": "New Cashier",
+        "pin": "1504",
+        "role": "cashier",
+        "active": true,
+        "store_id": "recXXXX",          # optional
+        "store_access": ["recYYY"]      # optional array
+    }
+    """
+    try:
+        table = AIRTABLE_USERS  # your Airtable users table
+
+        fields = {
+            "Name": payload.get("name"),
+            "PIN": payload.get("pin"),
+            "Role": payload.get("role"),
+            "Active": payload.get("active", True),
+        }
+
+        # Assigned Store (single select)
+        if payload.get("store_id"):
+            fields["Stores"] = [payload["store_id"]]
+
+        # Store Access (multi select)
+        if payload.get("store_access"):
+            fields["Store Access"] = payload["store_access"]
+
+        created = table.create(fields)
+
+        return {
+            "status": "success",
+            "id": created.get("id"),
+            "fields": created.get("fields"),
+        }
+
+    except Exception as e:
+        print("❌ Error creating user:", e)
+        raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
 # 📝 History logger
