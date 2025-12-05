@@ -237,8 +237,9 @@ async def list_stores():
         fields = rec.get("fields", {})
         status = fields.get("Status", "")
 
+        # Airtable single-select sometimes appears as a list
         if isinstance(status, list):
-            status = status[0]  # Airtable single-select sometimes returns a list
+            status = status[0]
 
         if str(status).lower() == "active":
             stores.append({
