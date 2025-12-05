@@ -101,39 +101,56 @@ def resolve_tenant_id(explicit: Optional[str]) -> str:
     return explicit or DEFAULT_TENANT_ID
 
 
+def normalize_store_value(store: Optional[str]) -> str:
+    """
+    Central helper for normalizing store names (lowercase, strip, remove quotes).
+    Used both for history + legacy name-based filters.
+    """
+    return (
+        (store or "")
+        .lower()
+        .strip()
+        .replace("’", "")
+        .replace("‘", "")
+        .replace("'", "")
+    )
+
+
 # -----------------------------------------------------------
 # 🧩 Models
 # -----------------------------------------------------------
 class ClosingCreate(BaseModel):
-    business_date: dt_date = Field(..., description="Business date (YYYY-MM-DD)")
-    store: str
-    total_sales: Optional[float] = 0.0
-    net_sales: Optional[float] = 0.0
-    cash_payments: Optional[float] = 0.0
-    card_payments: Optional[float] = 0.0
-    digital_payments: Optional[float] = 0.0
-    grab_payments: Optional[float] = 0.0
-    bank_transfer_payments: Optional[float] = 0.0
-    voucher_payments: Optional[float] = 0.0
-    marketing_expenses: Optional[float] = 0.0
-    actual_cash_counted: Optional[float] = 0.0
-    cash_float: Optional[float] = 0.0
-    kitchen_budget: Optional[float] = 0.0
-    bar_budget: Optional[float] = 0.0
-    non_food_budget: Optional[float] = 0.0
-    staff_meal_budget: Optional[float] = 0.0
-    variance_cash: Optional[float] = 0.0
-    total_budgets: Optional[float] = 0.0
-    cash_for_deposit: Optional[float] = 0.0
-    transfer_needed: Optional[float] = 0.0
-    tenant_id: Optional[str] = None
-    attachments: Optional[str] = None
-    submitted_by: Optional[str] = None
-
-
-class CashierLoginRequest(BaseModel):
-    cashier_id: str
-    pin: str
+  business_date: dt_date = Field(..., description="Business date (YYYY-MM-DD)")
+  # ⭐ NEW — preferred: linked Store record ID
+  store_id: Optional[str] = Field(
+      None, description="Linked Store record ID (preferred)"
+  )
+  # Legacy / display store name (kept for backwards compatibility and history)
+  store: Optional[str] = Field(
+      None, description="Store name (legacy; used for display/back-compat)"
+  )
+  total_sales: Optional[float] = 0.0
+  net_sales: Optional[float] = 0.0
+  cash_payments: Optional[float] = 0.0
+  card_payments: Optional[float] = 0.0
+  digital_payments: Optional[float] = 0.0
+  grab_payments: Optional[float] = 0.0
+  bank_transfer_payments: Optional[float] = 0.0
+  voucher_payments: Optional[float] = 0.0
+  marketing_expenses: Optional[float] = 0.0
+  actual_cash_counted: Optional[float] = 0.0
+  cash_float: Optional[float] = 0.0
+  kitchen_budget: Optional[float] = 0.0
+  bar_budget: Optional[float] = 0.0
+  non_food_budget: Optional[float] = 0.0
+  staff_meal_budget: Optional[float] = 0.0
+  variance_cash: Optional[float] = 0.0
+  total_budgets: Optional[float] = 0.0
+  cash_for_deposit: Optional[float] = 0.0
+  transfer_needed: Optional[float] = 0.0
+  tenant_id: Optional[str] = None
+  attachments: Optional[str] = None
+  submitted_by: Optional[str] = None
 
 
 class UnlockPayload(BaseModel):
@@ -188,112 +205,133 @@ def airtable_test():
 
 
 # -----------------------------------------------------------
-# 🔐 AUTH — Cashier List + Login
+# 🔐 AUTH — Users List + Login (Updated for NEW Users table)
 # -----------------------------------------------------------
-@app.get("/auth/cashiers")
-def list_cashiers():
+
+class UserLoginRequest(BaseModel):
+    user_id: str
+    pin: str
+
+
+@app.get("/auth/users")
+def list_users():
     """
-    Return all active cashiers for the login dropdown.
-    Uses Cashiers table:
-    - Name
-    - Cashier ID
-    - PIN
-    - Active
-    - Store
-    - Store Normalized (optional)
+    Returns all ACTIVE users from Airtable Users table.
+    Each user contains:
+    - user_id
+    - name
+    - role
+    - active
+    - store (linked)
+    - store_access (multi-linked)
     """
     try:
         base_id = os.getenv("AIRTABLE_BASE_ID")
         api_key = os.getenv("AIRTABLE_API_KEY")
-        if not base_id or not api_key:
-            raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
+        table = Table(api_key, base_id, "Users")
 
-        table = Table(api_key, base_id, "Cashiers")
-        records = table.all(formula="{Active} = TRUE()", max_records=100)
+        records = table.all(formula="{Active}=TRUE()", max_records=200)
 
         result = []
+
         for r in records:
             fields = r.get("fields", {})
-            if not fields:
-                continue
 
-            store = fields.get("Store") or ""
-            normalized_store = (
-                fields.get("Store Normalized")
-                or store.lower()
-                .strip()
-                .replace("’", "")
-                .replace("‘", "")
-                .replace("'", "")
-            )
-
-            result.append(
-                {
-                    "cashier_id": fields.get("Cashier ID"),
-                    "name": fields.get("Name"),
-                    "store": store,
-                    "store_normalized": normalized_store,
+            # Single Store (linked)
+            store_obj = None
+            if isinstance(fields.get("Stores"), list) and fields["Stores"]:
+                store_obj = {
+                    "id": fields["Stores"][0],
+                    "name": fields.get("Store (from Stores)")
                 }
-            )
+
+            # Multi Store Access
+            store_access_list = []
+            access_ids = fields.get("Store Access") or []
+            access_names = fields.get("Store (from Store Access)") or []
+            for i, sid in enumerate(access_ids):
+                store_access_list.append({
+                    "id": sid,
+                    "name": access_names[i] if i < len(access_names) else ""
+                })
+
+            result.append({
+                "user_id": fields.get("User ID"),
+                "name": fields.get("Name"),
+                "pin": str(fields.get("PIN")),
+                "role": fields.get("Role", "cashier").lower(),
+                "active": bool(fields.get("Active")),
+                "store": store_obj,
+                "store_access": store_access_list,
+            })
 
         return result
 
     except Exception as e:
-        print("❌ Error in /auth/cashiers:", e)
+        print("❌ Error in /auth/users:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
-@app.post("/auth/cashier-login")
-def cashier_login(payload: CashierLoginRequest):
+@app.post("/auth/user-login")
+def user_login(payload: UserLoginRequest):
     """
-    Validate a cashier by Cashier ID + PIN.
-    Returns cashier identity + store.
+    Validates login using Users table:
+    Requires:
+    - user_id
+    - pin
+    - Active = TRUE
     """
+
     try:
         base_id = os.getenv("AIRTABLE_BASE_ID")
         api_key = os.getenv("AIRTABLE_API_KEY")
-        if not base_id or not api_key:
-            raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
-
-        table = Table(api_key, base_id, "Cashiers")
-
-        cid = payload.cashier_id.strip()
-        pin = payload.pin.strip()
+        table = Table(api_key, base_id, "Users")
 
         formula = (
             f"AND("
-            f"{{Cashier ID}} = '{cid}', "
-            f"{{PIN}} = '{pin}', "
+            f"{{User ID}} = '{payload.user_id}',"
+            f"{{PIN}} = '{payload.pin}',"
             f"{{Active}} = TRUE()"
             f")"
         )
 
         records = table.all(formula=formula, max_records=1)
-        if not records:
-            raise HTTPException(status_code=401, detail="Invalid cashier ID or PIN")
 
-        fields = records[0].get("fields", {})
-        store = fields.get("Store") or ""
-        normalized_store = (
-            fields.get("Store Normalized")
-            or store.lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", "")
-        )
+        if not records:
+            raise HTTPException(status_code=401, detail="Invalid User ID or PIN")
+
+        fields = records[0]["fields"]
+
+        # Store
+        store_obj = None
+        if isinstance(fields.get("Stores"), list) and fields["Stores"]:
+            store_obj = {
+                "id": fields["Stores"][0],
+                "name": fields.get("Store (from Stores)")
+            }
+
+        # Store Access
+        store_access_list = []
+        access_ids = fields.get("Store Access") or []
+        access_names = fields.get("Store (from Store Access)") or []
+        for i, sid in enumerate(access_ids):
+            store_access_list.append({
+                "id": sid,
+                "name": access_names[i] if i < len(access_names) else ""
+            })
 
         return {
-            "cashier_id": fields.get("Cashier ID"),
+            "user_id": fields.get("User ID"),
             "name": fields.get("Name"),
-            "store": store,
-            "store_normalized": normalized_store,
+            "role": fields.get("Role", "cashier").lower(),
+            "store": store_obj,
+            "store_access": store_access_list,
         }
 
     except HTTPException:
         raise
     except Exception as e:
-        print("❌ Error in /auth/cashier-login:", e)
+        print("❌ Error in /auth/user-login:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -332,14 +370,7 @@ def _log_history(
         changed_csv = ", ".join(changed_fields) if changed_fields else None
         safe_snapshot = _safe_serialize(fields_snapshot)
 
-        normalized_store = (
-            (store or "")
-            .lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", "")
-        )
+        normalized_store = normalize_store_value(store)
 
         payload = {
             "Date": str(business_date),
@@ -368,10 +399,24 @@ def upsert_closing(payload: ClosingCreate):
     """
     Create or update a daily closing record in Airtable (upsert by store + date)
     with validation and history logging.
+
+    ⭐ NEW:
+    - Prefers `store_id` (linked Store record ID) for uniqueness
+    - Still supports legacy `store` (name) for backwards compatibility
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        store = payload.store.strip()
+
+        # Prefer store_id, but keep store name for display + history
+        store_id = (payload.store_id or "").strip() if getattr(payload, "store_id", None) else ""
+        store_name = (payload.store or "").strip() if getattr(payload, "store", None) else ""
+
+        if not store_id and not store_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Either store_id or store (name) is required.",
+            )
+
         business_date = payload.business_date.isoformat()
 
         # Resolve tenant
@@ -395,23 +440,40 @@ def upsert_closing(payload: ClosingCreate):
                 status_code=400, detail="Net sales cannot exceed total sales."
             )
 
-        normalized_store = (
-            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
-        )
-
-        formula = (
-            f"AND("
-            f"{{Store Normalized}}='{normalized_store}', "
+        # --------------------------------------------------
+        # Find existing record for this date + store
+        # 1) Filter by Date in Airtable
+        # 2) Match by store_id (linked) if provided
+        # 3) Fallback to legacy Store Normalized matching
+        # --------------------------------------------------
+        date_formula = (
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-            f")"
+        )
+        candidates = table.all(formula=date_formula, max_records=50)
+
+        existing = None
+        normalized_target = (
+            normalize_store_value(store_name) if store_name else None
         )
 
-        existing = table.all(formula=formula, max_records=1)
+        for rec in candidates:
+            f = rec.get("fields", {})
+            # Linked store IDs (Airtable returns list for linked fields)
+            linked_ids = f.get("Store") or []
+            if isinstance(linked_ids, list) and store_id and store_id in linked_ids:
+                existing = rec
+                break
+
+            # Legacy fallback — match on Store Normalized text
+            if not existing and normalized_target:
+                rec_norm = f.get("Store Normalized")
+                if isinstance(rec_norm, str) and normalize_store_value(rec_norm) == normalized_target:
+                    existing = rec
+                    break
 
         # Important: DO NOT send Store Normalized to Daily Closing (formula field)
         fields = {
             "Date": business_date,
-            "Store": store,
             "Tenant ID": tenant_id,
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
@@ -433,20 +495,27 @@ def upsert_closing(payload: ClosingCreate):
             "Last Updated At": datetime.now().isoformat(),
         }
 
+        # NEW: Set Store linked field
+        if store_id:
+            # Proper linked-record payload
+            fields["Store"] = [store_id]
+        elif store_name:
+            # Legacy behaviour — Airtable will coerce via name matching
+            fields["Store"] = store_name
+
         fields = {k: v for k, v in fields.items() if v is not None}
         fields = json.loads(json.dumps(fields, default=str))
 
         # --- Existing record → update ---
         if existing:
-            record = existing[0]
-            record_id = record["id"]
-            current_fields = record.get("fields", {})
+            record_id = existing["id"]
+            current_fields = existing.get("fields", {})
             current_lock = current_fields.get("Lock Status", "Unlocked")
 
             if current_lock in ["Locked", "Verified"]:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Record for {store} on {business_date} is locked and cannot be modified.",
+                    detail=f"Record for {store_name or 'store'} on {business_date} is locked and cannot be modified.",
                 )
 
             fields["Lock Status"] = "Locked"
@@ -454,7 +523,7 @@ def upsert_closing(payload: ClosingCreate):
 
             _log_history(
                 action="Updated",
-                store=store,
+                store=store_name or current_fields.get("Store", "Unknown"),
                 business_date=business_date,
                 fields_snapshot=updated.get("fields", {}),
                 submitted_by=payload.submitted_by,
@@ -477,7 +546,7 @@ def upsert_closing(payload: ClosingCreate):
 
         _log_history(
             action="Created",
-            store=store,
+            store=store_name or "Unknown",
             business_date=business_date,
             fields_snapshot=created.get("fields", {}),
             submitted_by=payload.submitted_by,
@@ -559,7 +628,7 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
 
 
 # -----------------------------------------------------------
-# 🔍 Filter helper for listing closings
+# 🔍 Filter helper for listing closings (legacy name-based)
 # -----------------------------------------------------------
 def _airtable_filter_formula(
     business_date: Optional[str], store: Optional[str]
@@ -572,9 +641,7 @@ def _airtable_filter_formula(
         )
 
     if store:
-        normalized_store = (
-            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
-        )
+        normalized_store = normalize_store_value(store)
         clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
     if not clauses:
@@ -587,12 +654,64 @@ def _airtable_filter_formula(
 # 🎯 Unique closing (prefill)
 # -----------------------------------------------------------
 @app.get("/closings/unique")
-def get_unique_closing(business_date: str = Query(...), store: str = Query(...)):
+def get_unique_closing(
+    business_date: str = Query(...),
+    store_id: Optional[str] = Query(
+        None, description="Linked Store record ID (preferred filter)"
+    ),
+    store: Optional[str] = Query(
+        None, description="Legacy store name filter (backwards compatible)"
+    ),
+):
+    """
+    Fetch a unique closing record for a given date + store.
+
+    NEW:
+    - Prefer filtering by `store_id` (linked Store record ID)
+    - Fallback to legacy `store` name using Store Normalized
+    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        normalized_store = (
-            store.lower().strip().replace("’", "").replace("‘", "").replace("'", "")
-        )
+
+        # --- Preferred path: use store_id (linked record) ---
+        if store_id:
+            date_formula = (
+                f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
+            )
+            candidates = table.all(formula=date_formula, max_records=50)
+
+            match = None
+            for r in candidates:
+                f = r.get("fields", {})
+                linked_ids = f.get("Store") or []
+                if isinstance(linked_ids, list) and store_id in linked_ids:
+                    match = r
+                    break
+
+            if not match:
+                return {
+                    "status": "empty",
+                    "message": f"No record found for store_id={store_id} on {business_date}",
+                    "fields": {},
+                    "lock_status": "Unlocked",
+                }
+
+            fields = match.get("fields", {})
+            return {
+                "status": "found",
+                "id": match.get("id"),
+                "lock_status": fields.get("Lock Status", "Unlocked"),
+                "fields": fields,
+            }
+
+        # --- Legacy path: use store name + Store Normalized ---
+        if not store:
+            raise HTTPException(
+                status_code=400,
+                detail="Either store_id or store (name) is required.",
+            )
+
+        normalized_store = normalize_store_value(store)
         formula = (
             f"AND("
             f"{{Store Normalized}}='{normalized_store}', "
@@ -618,6 +737,8 @@ def get_unique_closing(business_date: str = Query(...), store: str = Query(...))
             "fields": fields,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -658,6 +779,7 @@ def list_closings(
 ):
     """
     Lightweight admin endpoint used by the React dashboard to list closings.
+    (Still uses legacy store name filter; can be extended to store_id later.)
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
@@ -755,13 +877,7 @@ def get_history(
             )
 
         if store:
-            normalized_store = (
-                store.lower()
-                .strip()
-                .replace("’", "")
-                .replace("‘", "")
-                .replace("'", "")
-            )
+            normalized_store = normalize_store_value(store)
             clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
         if tenant_id:
@@ -858,13 +974,7 @@ def daily_summary(
         ]
 
         if store:
-            normalized_store = (
-                store.lower()
-                .strip()
-                .replace("’", "")
-                .replace("‘", "")
-                .replace("'", "")
-            )
+            normalized_store = normalize_store_value(store)
             clauses.append(f"{{Store Normalized}}='{normalized_store}'")
 
         formula = "AND(" + ", ".join(clauses) + ")"
