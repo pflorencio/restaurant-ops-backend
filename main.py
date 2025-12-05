@@ -17,6 +17,20 @@ from pyairtable import Table
 load_dotenv()
 
 # -----------------------------------------------------------
+# 🔐 Load Airtable Credentials
+# -----------------------------------------------------------
+AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
+AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
+AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
+AIRTABLE_DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE")
+AIRTABLE_DAILY_CLOSINGS_TABLE_ID = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE_ID")
+AIRTABLE_HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE")
+AIRTABLE_HISTORY_TABLE_ID = os.getenv("AIRTABLE_HISTORY_TABLE_ID")
+
+if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
+    raise Exception("❌ Missing Airtable credentials — check Render Environment settings.")
+
+# -----------------------------------------------------------
 # 🚀 FastAPI App Init
 # -----------------------------------------------------------
 app = FastAPI(title="Daily Sales & Cash Management API", version="1.1.0")
@@ -209,14 +223,17 @@ def airtable_test():
 @app.get("/stores")
 async def list_stores():
     """
-    Return all active stores from Airtable:
+    Returns:
     [
-        { "id": "recXXXX", "name": "Nonie's" },
-        { "id": "recYYYY", "name": "Muchos" },
-        ...
+      { "id": "recXXXX", "name": "Nonie's" },
+      { "id": "recYYYY", "name": "Muchos" },
+      ...
     ]
     """
     import requests
+
+    if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
+        raise HTTPException(status_code=500, detail="Airtable credentials missing")
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Stores"
     headers = {
@@ -232,12 +249,10 @@ async def list_stores():
         raise HTTPException(status_code=500, detail="Failed to fetch stores")
 
     stores = []
-
     for rec in data.get("records", []):
         fields = rec.get("fields", {})
         status = fields.get("Status", "")
 
-        # Airtable single-select sometimes appears as a list
         if isinstance(status, list):
             status = status[0]
 
