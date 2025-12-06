@@ -813,83 +813,46 @@ def _airtable_filter_formula(business_date: Optional[str],
 
 
 # -----------------------------------------------------------
-# 🎯 Unique closing (prefill)
+# 🎯 Unique closing (prefill) — simplified & corrected
 # -----------------------------------------------------------
 @app.get("/closings/unique")
 def get_unique_closing(
-    business_date: str = Query(...),
-    store_id: Optional[str] = Query(
-        None, description="Linked Store record ID (preferred filter)"),
-    store: Optional[str] = Query(
-        None, description="Legacy store name filter (backwards compatible)"),
+    business_date: str = Query(..., description="Date in YYYY-MM-DD"),
+    store_name: str = Query(..., description="Store name exactly as stored in Airtable"),
 ):
     """
-    Fetch a unique closing record for a given date + store.
+    Fetch a unique closing record using:
+    - business_date (string YYYY-MM-DD)
+    - store_name EXACT match (e.g., 'Muchos', 'Nonie's')
 
-    NEW:
-    - Prefer filtering by `store_id` (linked Store record ID)
-    - Fallback to legacy `store` name using Store Normalized
+    This reflects your Airtable structure where:
+    - Daily Closing table stores store names in the 'Store' field
+    - NOT linked record IDs
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # --- Preferred path: use store_id (linked record) ---
-        if store_id:
-            date_formula = (
-                f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-            )
-            candidates = table.all(formula=date_formula, max_records=50)
-
-            match = None
-            for r in candidates:
-                f = r.get("fields", {})
-                linked_ids = f.get("Store") or []
-                if isinstance(linked_ids, list) and store_id in linked_ids:
-                    match = r
-                    break
-
-            if not match:
-                return {
-                    "status": "empty",
-                    "message":
-                    f"No record found for store_id={store_id} on {business_date}",
-                    "fields": {},
-                    "lock_status": "Unlocked",
-                }
-
-            fields = match.get("fields", {})
-            return {
-                "status": "found",
-                "id": match.get("id"),
-                "lock_status": fields.get("Lock Status", "Unlocked"),
-                "fields": fields,
-            }
-
-        # --- Legacy path: use store name + Store Normalized ---
-        if not store:
-            raise HTTPException(
-                status_code=400,
-                detail="Either store_id or store (name) is required.",
-            )
-
-        normalized_store = normalize_store_value(store)
+        # Exact matching for both date and store name
         formula = (
             f"AND("
-            f"{{Store Normalized}}='{normalized_store}', "
-            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-            f")")
+            f"{{Date}} = '{business_date}', "
+            f"{{Store}} = '{store_name}'"
+            f")"
+        )
+
         records = table.all(formula=formula, max_records=1)
 
         if not records:
             return {
                 "status": "empty",
-                "message": f"No record found for {store} on {business_date}",
+                "message": f"No closing found for store '{store_name}' on {business_date}",
                 "fields": {},
                 "lock_status": "Unlocked",
             }
 
         r = records[0]
         fields = r.get("fields", {})
+
         return {
             "status": "found",
             "id": r.get("id"),
@@ -897,33 +860,9 @@ def get_unique_closing(
             "fields": fields,
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
-
-# --- Single record fetch by ID (used for auto-refresh, dashboard) ---
-@app.get("/closings/{record_id}")
-def get_closing_by_id(record_id: str = Path(
-    ..., description="Airtable record ID for the closing")):
-    try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record = table.get(record_id)
-        if not record:
-            raise HTTPException(status_code=404, detail="Record not found")
-
-        return {
-            "id": record.get("id"),
-            "fields": record.get("fields", {}),
-        }
-    except HTTPException:
-        raise
-    except Exception as e:
-        print("❌ Error in get_closing_by_id:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
 
 # -----------------------------------------------------------
 # 📋 Admin list: /closings
