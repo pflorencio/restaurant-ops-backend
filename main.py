@@ -493,13 +493,9 @@ async def create_user(payload: dict):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
-# 📝 History logger — Always write clean values
+# 📝 History logger
 # -----------------------------------------------------------
 def _safe_serialize(obj):
-    """
-    Safely convert any nested Python object (dates, lists, dicts) into
-    JSON-serializable types for the Snapshot field.
-    """
     if isinstance(obj, (datetime, dt_date)):
         return obj.isoformat()
     elif isinstance(obj, dict):
@@ -523,17 +519,49 @@ def _log_history(
     changed_fields: Optional[List[str]] = None,
     tenant_id: Optional[str] = None,
 ):
+    """
+    Write one row to Daily Closing History with full snapshot JSON.
+
+    Now robust to:
+    - Store being a linked record (list of IDs)
+    - Store being missing/empty
+    - Deriving the store name from the snapshot when possible
+    """
     try:
         table = _airtable_table(HISTORY_TABLE)
-
-        store = store or "Unknown"
-        normalized = normalize_store_value(store) or "unknown"
         changed_csv = ", ".join(changed_fields) if changed_fields else None
+        safe_snapshot = _safe_serialize(fields_snapshot)
+
+        # Derive a human-readable store name as best as we can
+        raw_store = store
+
+        # 1) Sometimes Airtable returns linked fields as a list
+        if isinstance(raw_store, list):
+            raw_store = raw_store[0] if raw_store else None
+
+        # 2) If we still don't have a name, try to infer from the snapshot
+        if (not raw_store) and isinstance(fields_snapshot, dict):
+            fs = fields_snapshot
+            candidate = (
+                fs.get("Store Name")
+                or fs.get("Store Display")
+                or fs.get("Store Normalized")
+                or fs.get("Store")
+            )
+            if isinstance(candidate, list):
+                candidate = candidate[0] if candidate else None
+            raw_store = candidate
+
+        # 3) Final fallback
+        if not raw_store:
+            raw_store = "Unknown"
+
+        normalized_store = normalize_store_value(str(raw_store))
 
         payload = {
-            "Date": business_date,
-            "Store": store,
-            "Store Normalized": normalized,
+            "Date": str(business_date),
+            "Store": raw_store,
+            "Store Normalized": normalized_store,
             "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
             "Action": action,
             "Changed By": submitted_by,
@@ -541,12 +569,10 @@ def _log_history(
             "Record ID": record_id,
             "Lock Status": lock_status,
             "Changed Fields": changed_csv,
-            "Snapshot": json.dumps(_safe_serialize(fields_snapshot), ensure_ascii=False),
+            "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
         }
 
         table.create(payload)
-        print("📘 History written:", action, store, business_date)
-
     except Exception as e:
         print("⚠️ Failed to log history:", e)
 
@@ -743,39 +769,82 @@ def _constant_time_equal(a: str, b: str) -> bool:
         result |= ord(x) ^ ord(y)
     return result == 0
 
-
 @app.post("/closings/{record_id}/unlock")
 def unlock_closing(record_id: str, payload: UnlockPayload):
+    """Unlock a record for editing (manager only)."""
     try:
-        manager_pin = os.getenv("MANAGER_PIN")
-        if not manager_pin:
-            raise HTTPException(status_code=500,
-                                detail="MANAGER_PIN not configured on server")
-
-        if not _constant_time_equal(payload.pin or "", manager_pin):
-            raise HTTPException(status_code=401, detail="Invalid manager PIN")
-
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        updated = table.update(
-            record_id,
+        manager_pin = os.getenv("MANAGER_PIN", "")
+
+        # Debug: help diagnose PIN issues without logging the actual PIN value
+        provided_pin = payload.pin or ""
+        print(
+            "🔐 Unlock attempt",
             {
-                "Lock Status": "Unlocked",
-                "Unlocked At": datetime.now().isoformat()
+                "provided_len": len(provided_pin),
+                "expected_len": len(manager_pin),
+                "pins_match": _constant_time_equal(provided_pin, manager_pin),
             },
         )
 
+        if not manager_pin:
+            raise HTTPException(
+                status_code=500,
+                detail="Manager PIN is not configured on the server.",
+            )
+
+        if not _constant_time_equal(provided_pin, manager_pin):
+            raise HTTPException(status_code=401, detail="Invalid manager PIN.")
+
+        # Load the existing record
+        existing = table.get(record_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="Record not found.")
+
+        fields = existing.get("fields", {})
+
+        # If already unlocked or verified, we still log but do not change status.
+        current_lock = fields.get("Lock Status", "Locked")
+        if current_lock in ["Unlocked", "Verified"]:
+            _log_history(
+                action="Unlocked (noop)",
+                store=fields.get("Store"),
+                business_date=fields.get("Date", ""),
+                fields_snapshot=fields,
+                submitted_by="Manager PIN",
+                record_id=record_id,
+                lock_status=current_lock,
+                changed_fields=[],
+                tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
+            )
+            return {
+                "status": "already_unlocked",
+                "id": record_id,
+                "lock_status": current_lock,
+                "fields": fields,
+            }
+
+        # Update lock status + timestamp + last updated by
+        update_fields = {
+            "Lock Status": "Unlocked",
+            "Unlocked At": datetime.now().isoformat(),
+            "Last Updated By": "Manager PIN",
+        }
+
+        updated = table.update(record_id, update_fields)
         fields = updated.get("fields", {})
 
+        # Log history
         _log_history(
             action="Unlocked",
-            store=store_name,
-            business_date=business_date,
+            store=fields.get("Store"),
+            business_date=fields.get("Date", ""),
             fields_snapshot=fields,
             submitted_by="Manager PIN",
             record_id=record_id,
             lock_status=fields.get("Lock Status"),
-            changed_fields=["Lock Status", "Unlocked At"],
-            tenant_id=tenant_id,
+            changed_fields=list(update_fields.keys()),
+            tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
         )
 
         return {
@@ -789,7 +858,6 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
     except Exception as e:
         print("❌ Error in unlock_closing:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # -----------------------------------------------------------
 # 🔍 Filter helper for listing closings (legacy name-based)
