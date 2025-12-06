@@ -496,18 +496,6 @@ async def create_user(payload: dict):
 # -----------------------------------------------------------
 # 📝 History logger
 # -----------------------------------------------------------
-def _safe_serialize(obj):
-    if isinstance(obj, (datetime, dt_date)):
-        return obj.isoformat()
-    elif isinstance(obj, dict):
-        return {k: _safe_serialize(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
-        return [_safe_serialize(v) for v in obj]
-    elif isinstance(obj, tuple):
-        return tuple(_safe_serialize(v) for v in obj)
-    return obj
-
-
 def _log_history(
     *,
     action: str,
@@ -522,18 +510,17 @@ def _log_history(
 ):
     """
     Write one row to Daily Closing History with full snapshot JSON.
+    Formula fields (like Store Normalized) must NOT be included.
     """
     try:
         table = _airtable_table(HISTORY_TABLE)
         changed_csv = ", ".join(changed_fields) if changed_fields else None
         safe_snapshot = _safe_serialize(fields_snapshot)
 
-        normalized_store = normalize_store_value(store)
-
         payload = {
             "Date": str(business_date),
-            "Store": store,
-            "Store Normalized": normalized_store,
+            "Store": store,  # TEXT FIELD OK
+            # DO NOT SEND Store Normalized (formula field)
             "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
             "Action": action,
             "Changed By": submitted_by,
@@ -545,9 +532,9 @@ def _log_history(
         }
 
         table.create(payload)
+        print(f"📘 History logged for {store} on {business_date}")  # helpful debug
     except Exception as e:
         print("⚠️ Failed to log history:", e)
-
 
 # -----------------------------------------------------------
 # 📌 UPSERT — Create or Update + Lock
