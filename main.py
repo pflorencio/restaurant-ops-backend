@@ -23,12 +23,14 @@ AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
 AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
 AIRTABLE_DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE")
-AIRTABLE_DAILY_CLOSINGS_TABLE_ID = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE_ID")
+AIRTABLE_DAILY_CLOSINGS_TABLE_ID = os.getenv(
+    "AIRTABLE_DAILY_CLOSINGS_TABLE_ID")
 AIRTABLE_HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE")
 AIRTABLE_HISTORY_TABLE_ID = os.getenv("AIRTABLE_HISTORY_TABLE_ID")
 
 if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
-    raise Exception("❌ Missing Airtable credentials — check Render Environment settings.")
+    raise Exception(
+        "❌ Missing Airtable credentials — check Render Environment settings.")
 
 # 👉 NEW: Users table (by name, that's fine here)
 AIRTABLE_USERS = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, "Users")
@@ -55,14 +57,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+
 # Generic OPTIONS for preflight (kept, but GET routes override for normal traffic)
 @app.options("/{rest_of_path:path}")
 async def options_handler(request: Request, rest_of_path: str):
     response = JSONResponse({"ok": True})
     response.headers["Access-Control-Allow-Origin"] = FRONTEND_URL
     response.headers[
-        "Access-Control-Allow-Methods"
-    ] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+        "Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
@@ -123,51 +125,46 @@ def normalize_store_value(store: Optional[str]) -> str:
     Central helper for normalizing store names (lowercase, strip, remove quotes).
     Used both for history + legacy name-based filters.
     """
-    return (
-        (store or "")
-        .lower()
-        .strip()
-        .replace("’", "")
-        .replace("‘", "")
-        .replace("'", "")
-    )
+    return ((store
+             or "").lower().strip().replace("’",
+                                            "").replace("‘",
+                                                        "").replace("'", ""))
 
 
 # -----------------------------------------------------------
 # 🧩 Models
 # -----------------------------------------------------------
 class ClosingCreate(BaseModel):
-  business_date: dt_date = Field(..., description="Business date (YYYY-MM-DD)")
-  # ⭐ NEW — preferred: linked Store record ID
-  store_id: Optional[str] = Field(
-      None, description="Linked Store record ID (preferred)"
-  )
-  # Legacy / display store name (kept for backwards compatibility and history)
-  store: Optional[str] = Field(
-      None, description="Store name (legacy; used for display/back-compat)"
-  )
-  total_sales: Optional[float] = 0.0
-  net_sales: Optional[float] = 0.0
-  cash_payments: Optional[float] = 0.0
-  card_payments: Optional[float] = 0.0
-  digital_payments: Optional[float] = 0.0
-  grab_payments: Optional[float] = 0.0
-  bank_transfer_payments: Optional[float] = 0.0
-  voucher_payments: Optional[float] = 0.0
-  marketing_expenses: Optional[float] = 0.0
-  actual_cash_counted: Optional[float] = 0.0
-  cash_float: Optional[float] = 0.0
-  kitchen_budget: Optional[float] = 0.0
-  bar_budget: Optional[float] = 0.0
-  non_food_budget: Optional[float] = 0.0
-  staff_meal_budget: Optional[float] = 0.0
-  variance_cash: Optional[float] = 0.0
-  total_budgets: Optional[float] = 0.0
-  cash_for_deposit: Optional[float] = 0.0
-  transfer_needed: Optional[float] = 0.0
-  tenant_id: Optional[str] = None
-  attachments: Optional[str] = None
-  submitted_by: Optional[str] = None
+    business_date: dt_date = Field(...,
+                                   description="Business date (YYYY-MM-DD)")
+    # ⭐ NEW — preferred: linked Store record ID
+    store_id: Optional[str] = Field(
+        None, description="Linked Store record ID (preferred)")
+    # Legacy / display store name (kept for backwards compatibility and history)
+    store: Optional[str] = Field(
+        None, description="Store name (legacy; used for display/back-compat)")
+    total_sales: Optional[float] = 0.0
+    net_sales: Optional[float] = 0.0
+    cash_payments: Optional[float] = 0.0
+    card_payments: Optional[float] = 0.0
+    digital_payments: Optional[float] = 0.0
+    grab_payments: Optional[float] = 0.0
+    bank_transfer_payments: Optional[float] = 0.0
+    voucher_payments: Optional[float] = 0.0
+    marketing_expenses: Optional[float] = 0.0
+    actual_cash_counted: Optional[float] = 0.0
+    cash_float: Optional[float] = 0.0
+    kitchen_budget: Optional[float] = 0.0
+    bar_budget: Optional[float] = 0.0
+    non_food_budget: Optional[float] = 0.0
+    staff_meal_budget: Optional[float] = 0.0
+    variance_cash: Optional[float] = 0.0
+    total_budgets: Optional[float] = 0.0
+    cash_for_deposit: Optional[float] = 0.0
+    transfer_needed: Optional[float] = 0.0
+    tenant_id: Optional[str] = None
+    attachments: Optional[str] = None
+    submitted_by: Optional[str] = None
 
 
 class UnlockPayload(BaseModel):
@@ -210,7 +207,8 @@ def airtable_test():
     table_name = os.getenv("AIRTABLE_TABLE_NAME")
     if not (base_id and api_key and table_name):
         return {
-            "error": "Missing AIRTABLE_BASE_ID, AIRTABLE_API_KEY, or AIRTABLE_TABLE_NAME"
+            "error":
+            "Missing AIRTABLE_BASE_ID, AIRTABLE_API_KEY, or AIRTABLE_TABLE_NAME"
         }
 
     try:
@@ -219,6 +217,7 @@ def airtable_test():
         return {"records": [r.get("fields", {}) for r in records]}
     except Exception as e:
         return {"error": str(e)}
+
 
 # ---------------------------------------------------------
 # GET /stores  →  List all active stores
@@ -236,12 +235,11 @@ async def list_stores():
     import requests
 
     if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
-        raise HTTPException(status_code=500, detail="Airtable credentials missing")
+        raise HTTPException(status_code=500,
+                            detail="Airtable credentials missing")
 
     url = f"https://api.airtable.com/v0/{AIRTABLE_BASE_ID}/Stores"
-    headers = {
-        "Authorization": f"Bearer {AIRTABLE_API_KEY}"
-    }
+    headers = {"Authorization": f"Bearer {AIRTABLE_API_KEY}"}
 
     try:
         r = requests.get(url, headers=headers)
@@ -279,53 +277,53 @@ class UserLoginRequest(BaseModel):
 @app.get("/auth/users")
 def list_users():
     """
-    Returns all ACTIVE users from Airtable Users table.
-
-    Each user contains:
-    - user_id  (Airtable record ID)
-    - name
-    - role
-    - active
-    - store:   { id, name } or null
-    - store_access: [ { id, name }, ... ]
+    Returns all ACTIVE users from Airtable Users table with normalized store data.
     """
+
     try:
         records = AIRTABLE_USERS.all(formula="{Active}=TRUE()", max_records=200)
-
         result = []
 
         for r in records:
             fields = r.get("fields", {})
 
-            # Single Store (linked)
-            store_obj = None
-            if isinstance(fields.get("Stores"), list) and fields["Stores"]:
-                store_obj = {
-                    "id": fields["Stores"][0],
-                    # Lookup field name from Stores table
-                    "name": fields.get("Store (from Stores)")
-                }
-
-            # Multi Store Access
+            # ---------------------------------------
+            # Build Store Access (multi-store)
+            # ---------------------------------------
             store_access_list = []
             access_ids = fields.get("Store Access") or []
             access_names = fields.get("Store (from Store Access)") or []
+
             for i, sid in enumerate(access_ids):
                 store_access_list.append({
                     "id": sid,
                     "name": access_names[i] if i < len(access_names) else ""
                 })
 
+            # ---------------------------------------
+            # Determine Primary Store
+            # ---------------------------------------
+            store_obj = None
+
+            # Case 1: "Stores" field contains a linked store
+            if isinstance(fields.get("Stores"), list) and fields["Stores"]:
+                store_obj = {
+                    "id": fields["Stores"][0],
+                    "name": fields.get("Store (from Stores)")
+                }
+
+            # Case 2: fallback — first Store Access
+            if not store_obj and store_access_list:
+                store_obj = store_access_list[0]
+
             result.append({
-                # ✅ Use Airtable record ID as canonical user_id
                 "user_id": r.get("id"),
                 "name": fields.get("Name"),
-                # keep pin in payload if you like, or set to None for security
                 "pin": str(fields.get("PIN", "")),
                 "role": str(fields.get("Role", "cashier")).lower(),
                 "active": bool(fields.get("Active")),
                 "store": store_obj,
-                "store_access": store_access_list,
+                "store_access": store_access_list
             })
 
         return result
@@ -335,59 +333,70 @@ def list_users():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+
 @app.post("/auth/user-login")
 def user_login(payload: UserLoginRequest):
     """
-    Validates login using Users table.
-
-    - `user_id` is the Airtable record ID (from /auth/users).
-    - Checks Active = TRUE and PIN match.
+    Validates login using Airtable record ID and returns normalized user object.
     """
+
     try:
-        # 1) Fetch the record directly by Airtable record ID
         record = AIRTABLE_USERS.get(payload.user_id)
         if not record:
             raise HTTPException(status_code=401, detail="Invalid user selection")
 
         fields = record.get("fields", {})
 
-        # 2) Must be active
+        # Must be active
         if not bool(fields.get("Active")):
             raise HTTPException(status_code=401, detail="User is inactive")
 
-        # 3) PIN check
+        # PIN must match
         stored_pin = str(fields.get("PIN", ""))
         if payload.pin != stored_pin:
             raise HTTPException(status_code=401, detail="Invalid PIN")
 
-        # 4) Build store + store_access objects
-        store_obj = None
-        if isinstance(fields.get("Stores"), list) and fields["Stores"]:
-            store_obj = {
-                "id": fields["Stores"][0],
-                "name": fields.get("Store (from Stores)"),
-            }
-
+        # ---------------------------------------
+        # Build Store Access
+        # ---------------------------------------
         store_access_list = []
         access_ids = fields.get("Store Access") or []
         access_names = fields.get("Store (from Store Access)") or []
+
         for i, sid in enumerate(access_ids):
             store_access_list.append({
                 "id": sid,
                 "name": access_names[i] if i < len(access_names) else ""
             })
 
-        # 5) Return login payload
+        # ---------------------------------------
+        # Determine Primary Store (same logic)
+        # ---------------------------------------
+        store_obj = None
+
+        if isinstance(fields.get("Stores"), list) and fields["Stores"]:
+            store_obj = {
+                "id": fields["Stores"][0],
+                "name": fields.get("Store (from Stores)")
+            }
+
+        if not store_obj and store_access_list:
+            store_obj = store_access_list[0]
+
+        # ---------------------------------------
+        # Return login payload
+        # ---------------------------------------
         return {
             "user_id": record.get("id"),
             "name": fields.get("Name"),
             "role": str(fields.get("Role", "cashier")).lower(),
             "store": store_obj,
-            "store_access": store_access_list,
+            "store_access": store_access_list
         }
 
     except HTTPException:
         raise
+
     except Exception as e:
         print("❌ Error in /auth/user-login:", e)
         raise HTTPException(status_code=500, detail=str(e))
@@ -418,9 +427,8 @@ async def update_user(user_id: str, payload: dict):
 
     # Change primary store (linked field is "Stores")
     if "store_id" in payload:
-        update_fields["Stores"] = (
-            [payload["store_id"]] if payload["store_id"] else []
-        )
+        update_fields["Stores"] = ([payload["store_id"]]
+                                   if payload["store_id"] else [])
 
     # Update store access (multi-linked "Store Access")
     if "store_access_ids" in payload:
@@ -432,6 +440,7 @@ async def update_user(user_id: str, payload: dict):
     except Exception as e:
         print("❌ Error updating user:", e)
         raise HTTPException(status_code=500, detail="Failed to update user")
+
 
 # ---------------------------------------------------------
 # POST /admin/users  →  Create a new user
@@ -476,6 +485,7 @@ async def create_user(payload: dict):
     except Exception as e:
         print("❌ Error creating user:", e)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 # -----------------------------------------------------------
 # 📝 History logger
@@ -550,8 +560,10 @@ def upsert_closing(payload: ClosingCreate):
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
         # Prefer store_id, but keep store name for display + history
-        store_id = (payload.store_id or "").strip() if getattr(payload, "store_id", None) else ""
-        store_name = (payload.store or "").strip() if getattr(payload, "store", None) else ""
+        store_id = (payload.store_id or "").strip() if getattr(
+            payload, "store_id", None) else ""
+        store_name = (payload.store or "").strip() if getattr(
+            payload, "store", None) else ""
 
         if not store_id and not store_name:
             raise HTTPException(
@@ -566,21 +578,15 @@ def upsert_closing(payload: ClosingCreate):
 
         # --- Validation ---
         if payload.total_sales is not None and payload.total_sales < 0:
-            raise HTTPException(
-                status_code=400, detail="Total sales cannot be negative."
-            )
+            raise HTTPException(status_code=400,
+                                detail="Total sales cannot be negative.")
         if payload.net_sales is not None and payload.net_sales < 0:
-            raise HTTPException(
-                status_code=400, detail="Net sales cannot be negative."
-            )
-        if (
-            payload.total_sales is not None
-            and payload.net_sales is not None
-            and payload.total_sales < payload.net_sales
-        ):
-            raise HTTPException(
-                status_code=400, detail="Net sales cannot exceed total sales."
-            )
+            raise HTTPException(status_code=400,
+                                detail="Net sales cannot be negative.")
+        if (payload.total_sales is not None and payload.net_sales is not None
+                and payload.total_sales < payload.net_sales):
+            raise HTTPException(status_code=400,
+                                detail="Net sales cannot exceed total sales.")
 
         # --------------------------------------------------
         # Find existing record for this date + store
@@ -594,22 +600,23 @@ def upsert_closing(payload: ClosingCreate):
         candidates = table.all(formula=date_formula, max_records=50)
 
         existing = None
-        normalized_target = (
-            normalize_store_value(store_name) if store_name else None
-        )
+        normalized_target = (normalize_store_value(store_name)
+                             if store_name else None)
 
         for rec in candidates:
             f = rec.get("fields", {})
             # Linked store IDs (Airtable returns list for linked fields)
             linked_ids = f.get("Store") or []
-            if isinstance(linked_ids, list) and store_id and store_id in linked_ids:
+            if isinstance(linked_ids,
+                          list) and store_id and store_id in linked_ids:
                 existing = rec
                 break
 
             # Legacy fallback — match on Store Normalized text
             if not existing and normalized_target:
                 rec_norm = f.get("Store Normalized")
-                if isinstance(rec_norm, str) and normalize_store_value(rec_norm) == normalized_target:
+                if isinstance(rec_norm, str) and normalize_store_value(
+                        rec_norm) == normalized_target:
                     existing = rec
                     break
 
@@ -657,7 +664,8 @@ def upsert_closing(payload: ClosingCreate):
             if current_lock in ["Locked", "Verified"]:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Record for {store_name or 'store'} on {business_date} is locked and cannot be modified.",
+                    detail=
+                    f"Record for {store_name or 'store'} on {business_date} is locked and cannot be modified.",
                 )
 
             fields["Lock Status"] = "Locked"
@@ -676,10 +684,14 @@ def upsert_closing(payload: ClosingCreate):
             )
 
             return {
-                "status": "updated_locked",
-                "id": record_id,
-                "lock_status": updated.get("fields", {}).get("Lock Status", "Locked"),
-                "fields": updated.get("fields", {}),
+                "status":
+                "updated_locked",
+                "id":
+                record_id,
+                "lock_status":
+                updated.get("fields", {}).get("Lock Status", "Locked"),
+                "fields":
+                updated.get("fields", {}),
             }
 
         # --- No record → create new ---
@@ -701,7 +713,8 @@ def upsert_closing(payload: ClosingCreate):
         return {
             "status": "created_locked",
             "id": created.get("id"),
-            "lock_status": created.get("fields", {}).get("Lock Status", "Locked"),
+            "lock_status": created.get("fields",
+                                       {}).get("Lock Status", "Locked"),
             "fields": created.get("fields", {}),
         }
 
@@ -729,9 +742,8 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
     try:
         manager_pin = os.getenv("MANAGER_PIN")
         if not manager_pin:
-            raise HTTPException(
-                status_code=500, detail="MANAGER_PIN not configured on server"
-            )
+            raise HTTPException(status_code=500,
+                                detail="MANAGER_PIN not configured on server")
 
         if not _constant_time_equal(payload.pin or "", manager_pin):
             raise HTTPException(status_code=401, detail="Invalid manager PIN")
@@ -739,7 +751,10 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         updated = table.update(
             record_id,
-            {"Lock Status": "Unlocked", "Unlocked At": datetime.now().isoformat()},
+            {
+                "Lock Status": "Unlocked",
+                "Unlocked At": datetime.now().isoformat()
+            },
         )
 
         fields = updated.get("fields", {})
@@ -772,9 +787,8 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
 # -----------------------------------------------------------
 # 🔍 Filter helper for listing closings (legacy name-based)
 # -----------------------------------------------------------
-def _airtable_filter_formula(
-    business_date: Optional[str], store: Optional[str]
-) -> Optional[str]:
+def _airtable_filter_formula(business_date: Optional[str],
+                             store: Optional[str]) -> Optional[str]:
     clauses = []
 
     if business_date:
@@ -799,11 +813,9 @@ def _airtable_filter_formula(
 def get_unique_closing(
     business_date: str = Query(...),
     store_id: Optional[str] = Query(
-        None, description="Linked Store record ID (preferred filter)"
-    ),
+        None, description="Linked Store record ID (preferred filter)"),
     store: Optional[str] = Query(
-        None, description="Legacy store name filter (backwards compatible)"
-    ),
+        None, description="Legacy store name filter (backwards compatible)"),
 ):
     """
     Fetch a unique closing record for a given date + store.
@@ -833,7 +845,8 @@ def get_unique_closing(
             if not match:
                 return {
                     "status": "empty",
-                    "message": f"No record found for store_id={store_id} on {business_date}",
+                    "message":
+                    f"No record found for store_id={store_id} on {business_date}",
                     "fields": {},
                     "lock_status": "Unlocked",
                 }
@@ -858,8 +871,7 @@ def get_unique_closing(
             f"AND("
             f"{{Store Normalized}}='{normalized_store}', "
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-            f")"
-        )
+            f")")
         records = table.all(formula=formula, max_records=1)
 
         if not records:
@@ -888,9 +900,8 @@ def get_unique_closing(
 
 # --- Single record fetch by ID (used for auto-refresh, dashboard) ---
 @app.get("/closings/{record_id}")
-def get_closing_by_id(
-    record_id: str = Path(..., description="Airtable record ID for the closing")
-):
+def get_closing_by_id(record_id: str = Path(
+    ..., description="Airtable record ID for the closing")):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         record = table.get(record_id)
@@ -913,11 +924,10 @@ def get_closing_by_id(
 # -----------------------------------------------------------
 @app.get("/closings")
 def list_closings(
-    business_date: Optional[str] = Query(
-        None, description="Filter by business date YYYY-MM-DD"
-    ),
-    store: Optional[str] = Query(None, description="Filter by store name"),
-    limit: int = Query(50, description="Maximum records to return"),
+        business_date: Optional[str] = Query(
+            None, description="Filter by business date YYYY-MM-DD"),
+        store: Optional[str] = Query(None, description="Filter by store name"),
+        limit: int = Query(50, description="Maximum records to return"),
 ):
     """
     Lightweight admin endpoint used by the React dashboard to list closings.
@@ -929,10 +939,12 @@ def list_closings(
         records = table.all(max_records=limit, formula=formula)
 
         return {
-            "count": len(records),
-            "records": [
-                {"id": r.get("id"), "fields": r.get("fields", {})} for r in records
-            ],
+            "count":
+            len(records),
+            "records": [{
+                "id": r.get("id"),
+                "fields": r.get("fields", {})
+            } for r in records],
         }
     except Exception as e:
         print("❌ Error listing closings:", e)
@@ -950,9 +962,8 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
     try:
         updates = payload.root or {}
         if not isinstance(updates, dict) or not updates:
-            raise HTTPException(
-                status_code=400, detail="Payload must be a non-empty object"
-            )
+            raise HTTPException(status_code=400,
+                                detail="Payload must be a non-empty object")
 
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         existing = table.get(record_id)
@@ -1000,10 +1011,10 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
 # -----------------------------------------------------------
 @app.get("/history")
 def get_history(
-    business_date: Optional[str] = Query(None),
-    store: Optional[str] = Query(None),
-    tenant_id: Optional[str] = Query(None),
-    limit: int = Query(100),
+        business_date: Optional[str] = Query(None),
+        store: Optional[str] = Query(None),
+        tenant_id: Optional[str] = Query(None),
+        limit: int = Query(100),
 ):
     """
     Fetch history entries for admin view.
@@ -1029,10 +1040,12 @@ def get_history(
 
         records = table.all(max_records=limit, formula=formula)
         return {
-            "count": len(records),
-            "records": [
-                {"id": r.get("id"), "fields": r.get("fields", {})} for r in records
-            ],
+            "count":
+            len(records),
+            "records": [{
+                "id": r.get("id"),
+                "fields": r.get("fields", {})
+            } for r in records],
         }
     except Exception as e:
         print("❌ Error fetching history:", e)
@@ -1102,8 +1115,7 @@ def verify_closing(payload: VerifyPayload):
 def daily_summary(
     business_date: str = Query(..., description="Business date YYYY-MM-DD"),
     store: Optional[str] = Query(
-        None, description="Optional store filter, e.g. `Nonie's`"
-    ),
+        None, description="Optional store filter, e.g. `Nonie's`"),
 ):
     """
     Very simple daily summary for management.
@@ -1124,10 +1136,13 @@ def daily_summary(
         records = closings_table.all(formula=formula, max_records=100)
         if not records:
             return {
-                "business_date": business_date,
-                "store": store,
-                "preview": f"No closings found for {business_date}"
-                + (f" at {store}" if store else ""),
+                "business_date":
+                business_date,
+                "store":
+                store,
+                "preview":
+                f"No closings found for {business_date}" +
+                (f" at {store}" if store else ""),
             }
 
         agg = defaultdict(float)
@@ -1137,23 +1152,23 @@ def daily_summary(
             f = r.get("fields", {})
             stores_seen.add(f.get("Store", "Unknown"))
             for key in [
-                "Total Sales",
-                "Net Sales",
-                "Cash Payments",
-                "Card Payments",
-                "Digital Payments",
-                "Grab Payments",
-                "Voucher Payments",
-                "Bank Transfer Payments",
-                "Marketing Expenses",
-                "Actual Cash Counted",
-                "Cash Float",
-                "Kitchen Budget",
-                "Bar Budget",
-                "Non Food Budget",
-                "Staff Meal Budget",
-                "Cash for Deposit",
-                "Transfer Needed",
+                    "Total Sales",
+                    "Net Sales",
+                    "Cash Payments",
+                    "Card Payments",
+                    "Digital Payments",
+                    "Grab Payments",
+                    "Voucher Payments",
+                    "Bank Transfer Payments",
+                    "Marketing Expenses",
+                    "Actual Cash Counted",
+                    "Cash Float",
+                    "Kitchen Budget",
+                    "Bar Budget",
+                    "Non Food Budget",
+                    "Staff Meal Budget",
+                    "Cash for Deposit",
+                    "Transfer Needed",
             ]:
                 val = f.get(key)
                 if isinstance(val, (int, float)):
@@ -1167,9 +1182,8 @@ def daily_summary(
         if store:
             lines.append(f"Store: {store}")
         else:
-            joined = (
-                ", ".join(sorted(s for s in stores_seen if s != "Unknown")) or "N/A"
-            )
+            joined = (", ".join(
+                sorted(s for s in stores_seen if s != "Unknown")) or "N/A")
             lines.append(f"Stores included: {joined}")
 
         lines.append("")
@@ -1180,10 +1194,8 @@ def daily_summary(
             f"{peso(agg['Cash Payments'] + agg['Card Payments'] + agg['Digital Payments'])}"
         )
         lines.append(f"Marketing Expenses: {peso(agg['Marketing Expenses'])}")
-        lines.append(
-            f"Cash for Deposit: {peso(agg['Cash for Deposit'])}, "
-            f"Transfer Needed: {peso(agg['Transfer Needed'])}"
-        )
+        lines.append(f"Cash for Deposit: {peso(agg['Cash for Deposit'])}, "
+                     f"Transfer Needed: {peso(agg['Transfer Needed'])}")
         lines.append("")
         lines.append("AI-generated summary is not enabled yet.")
         lines.append("Once configured, this section will show:")
