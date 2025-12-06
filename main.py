@@ -813,46 +813,113 @@ def _airtable_filter_formula(business_date: Optional[str],
 
 
 # -----------------------------------------------------------
-# 🎯 Unique closing (prefill) — simplified & corrected
+# 🎯 Unique closing (prefill)
 # -----------------------------------------------------------
 @app.get("/closings/unique")
 def get_unique_closing(
-    business_date: str = Query(..., description="Date in YYYY-MM-DD"),
-    store_name: str = Query(..., description="Store name exactly as stored in Airtable"),
+    business_date: str = Query(...),
+    store_id: Optional[str] = Query(
+        None, description="Linked Store record ID (preferred filter)"
+    ),
+    store_name: Optional[str] = Query(
+        None, description="Store name (e.g., \"Nonie's\")"
+    ),
+    store: Optional[str] = Query(
+        None,
+        description="Legacy store name param (alias for store_name, backwards compatible)",
+    ),
 ):
     """
-    Fetch a unique closing record using:
-    - business_date (string YYYY-MM-DD)
-    - store_name EXACT match (e.g., 'Muchos', 'Nonie's')
+    Fetch a unique closing record for a given date + store.
 
-    This reflects your Airtable structure where:
-    - Daily Closing table stores store names in the 'Store' field
-    - NOT linked record IDs
+    Priority:
+    1. If `store_id` is provided, match by linked Store record on that date.
+    2. Else, use store_name / store and `Store Normalized` + date.
+
+    Returns:
+    - status: "found" | "empty"
+    - id: Airtable record ID (if found)
+    - lock_status: "Locked" | "Unlocked"
+    - fields: raw Airtable fields (if found)
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Exact matching for both date and store name
+        # ---------------------------------------------------
+        # 1) Preferred path: filter by store_id + date
+        # ---------------------------------------------------
+        if store_id:
+            # Build a date-only formula using IS_SAME + DATETIME_PARSE
+            date_formula = (
+                "IS_SAME("
+                "{{Date}}, "
+                "DATETIME_PARSE('{bd}', 'YYYY-MM-DD'), "
+                "'day'"
+                ")"
+            ).format(bd=business_date)
+
+            candidates = table.all(formula=date_formula, max_records=50)
+
+            match = None
+            for r in candidates:
+                f = r.get("fields", {})
+                linked_ids = f.get("Store") or []
+                # Airtable linked-field is usually a list of record IDs
+                if isinstance(linked_ids, list) and store_id in linked_ids:
+                    match = r
+                    break
+
+            if not match:
+                return {
+                    "status": "empty",
+                    "message": f"No record found for store_id={store_id} on {business_date}",
+                    "fields": {},
+                    "lock_status": "Unlocked",
+                }
+
+            fields = match.get("fields", {})
+            return {
+                "status": "found",
+                "id": match.get("id"),
+                "lock_status": fields.get("Lock Status", "Unlocked"),
+                "fields": fields,
+            }
+
+        # ---------------------------------------------------
+        # 2) Fallback: use store_name / store + Store Normalized
+        # ---------------------------------------------------
+        effective_store_name = store_name or store
+        if not effective_store_name:
+            raise HTTPException(
+                status_code=400,
+                detail="Either store_id or store_name/store is required.",
+            )
+
+        normalized_store = normalize_store_value(effective_store_name)
+
         formula = (
-            f"AND("
-            f"{{Date}} = '{business_date}', "
-            f"{{Store}} = '{store_name}'"
-            f")"
-        )
+            "AND("
+            "{{Store Normalized}}='{normalized}', "
+            "IS_SAME("
+            "{{Date}}, "
+            "DATETIME_PARSE('{bd}', 'YYYY-MM-DD'), "
+            "'day'"
+            ")"
+            ")"
+        ).format(normalized=normalized_store, bd=business_date)
 
         records = table.all(formula=formula, max_records=1)
 
         if not records:
             return {
                 "status": "empty",
-                "message": f"No closing found for store '{store_name}' on {business_date}",
+                "message": f"No record found for {effective_store_name} on {business_date}",
                 "fields": {},
                 "lock_status": "Unlocked",
             }
 
         r = records[0]
         fields = r.get("fields", {})
-
         return {
             "status": "found",
             "id": r.get("id"),
@@ -860,6 +927,8 @@ def get_unique_closing(
             "fields": fields,
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("❌ Error in /closings/unique:", e)
         raise HTTPException(status_code=500, detail=str(e))
