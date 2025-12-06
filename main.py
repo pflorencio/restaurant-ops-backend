@@ -495,6 +495,22 @@ async def create_user(payload: dict):
 # -----------------------------------------------------------
 # 📝 History logger — Always write clean values
 # -----------------------------------------------------------
+def _safe_serialize(obj):
+    """
+    Safely convert any nested Python object (dates, lists, dicts) into
+    JSON-serializable types for the Snapshot field.
+    """
+    if isinstance(obj, (datetime, dt_date)):
+        return obj.isoformat()
+    elif isinstance(obj, dict):
+        return {k: _safe_serialize(v) for k, v in obj.items()}
+    elif isinstance(obj, list):
+        return [_safe_serialize(v) for v in obj]
+    elif isinstance(obj, tuple):
+        return tuple(_safe_serialize(v) for v in obj)
+    return obj
+
+
 def _log_history(
     *,
     action: str,
