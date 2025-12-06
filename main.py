@@ -768,14 +768,14 @@ def unlock_closing(record_id: str, payload: UnlockPayload):
 
         _log_history(
             action="Unlocked",
-            store=fields.get("Store", "Unknown"),
-            business_date=fields.get("Date", ""),
+            store=store_name,
+            business_date=business_date,
             fields_snapshot=fields,
             submitted_by="Manager PIN",
             record_id=record_id,
             lock_status=fields.get("Lock Status"),
             changed_fields=["Lock Status", "Unlocked At"],
-            tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
+            tenant_id=tenant_id,
         )
 
         return {
@@ -995,15 +995,14 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         try:
             _log_history(
                 action="Patched",
-                store=fields.get("Store", "Unknown"),
-                business_date=fields.get("Date", ""),
+                store=store_name,
+                business_date=business_date,
                 fields_snapshot=updated.get("fields", {}),
                 submitted_by=fields.get("Last Updated By"),
                 record_id=record_id,
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=changed_keys,
-                tenant_id=updated.get("fields", {}).get("Tenant ID")
-                or DEFAULT_TENANT_ID,
+                tenant_id=tenant_id,
             )
         except Exception as e:
             print("⚠️ Failed to log patch history:", e)
@@ -1098,15 +1097,14 @@ def verify_closing(payload: VerifyPayload):
         try:
             _log_history(
                 action=f"Verification - {status}",
-                store=fields.get("Store", "Unknown"),
-                business_date=fields.get("Date", ""),
+                store=store_name,
+                business_date=business_date,
                 fields_snapshot=updated.get("fields", {}),
                 submitted_by=payload.verified_by,
                 record_id=record_id,
                 lock_status=updated.get("fields", {}).get("Lock Status"),
                 changed_fields=list(update_fields.keys()),
-                tenant_id=updated.get("fields", {}).get("Tenant ID")
-                or DEFAULT_TENANT_ID,
+                tenant_id=tenant_id,
             )
         except Exception as e:
             print("⚠️ Failed to log verification history:", e)
