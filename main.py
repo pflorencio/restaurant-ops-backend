@@ -33,7 +33,13 @@ if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
         "❌ Missing Airtable credentials — check Render Environment settings.")
 
 # 👉 NEW: Users table (by name, that's fine here)
-AIRTABLE_USERS = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, "Users")
+AIRTABLE_USERS_TABLE_ID = os.getenv("AIRTABLE_USERS_TABLE_ID")
+
+AIRTABLE_USERS = Table(
+    AIRTABLE_API_KEY,
+    AIRTABLE_BASE_ID,
+    AIRTABLE_USERS_TABLE_ID
+)
 
 # -----------------------------------------------------------
 # 🚀 FastAPI App Init
