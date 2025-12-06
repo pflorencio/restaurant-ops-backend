@@ -550,41 +550,51 @@ def _log_history(
 
 
 # -----------------------------------------------------------
-# 📌 UPSERT — Create or Update + Lock (FIXED Store handling)
+# 📌 UPSERT — Create or Update + Lock
 # -----------------------------------------------------------
 @app.post("/closings")
 def upsert_closing(payload: ClosingCreate):
+    """
+    Create or update a daily closing record in Airtable.
+
+    THIS VERSION:
+    - Always prefers store_id
+    - Never sends store_name to Airtable
+    - Avoids legacy fallbacks unless ABSOLUTELY needed
+    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Prefer store_id (linked record ID)
-        store_id = (payload.store_id or "").strip()
-        store_name = (payload.store or "").strip()
+        # -------------------------
+        # 🔍 Normalize store inputs
+        # -------------------------
+        store_id = getattr(payload, "store_id", None)
+        store_name = getattr(payload, "store_name", None)  # <-- fixed key
 
-        if not store_id and not store_name:
+        if not store_id:
             raise HTTPException(
                 status_code=400,
-                detail="Either store_id or store (name) is required."
+                detail="store_id is required. Store name cannot be used for linked tables.",
             )
 
         business_date = payload.business_date.isoformat()
-
-        # Resolve tenant
         tenant_id = resolve_tenant_id(getattr(payload, "tenant_id", None))
 
-        # --------------------------
-        # Validation
-        # --------------------------
+        # -------------------------
+        # 🔍 Validation
+        # -------------------------
         if payload.total_sales is not None and payload.total_sales < 0:
-            raise HTTPException(400, "Total sales cannot be negative.")
+            raise HTTPException(status_code=400, detail="Total sales cannot be negative.")
+
         if payload.net_sales is not None and payload.net_sales < 0:
-            raise HTTPException(400, "Net sales cannot be negative.")
+            raise HTTPException(status_code=400, detail="Net sales cannot be negative.")
+
         if (payload.total_sales is not None and payload.net_sales is not None
                 and payload.total_sales < payload.net_sales):
-            raise HTTPException(400, "Net sales cannot exceed total sales.")
+            raise HTTPException(status_code=400, detail="Net sales cannot exceed total sales.")
 
         # --------------------------------------------------
-        # FIND EXISTING RECORD (Date + Store)
+        # 🔍 Find existing record by store_id + date ONLY
         # --------------------------------------------------
         date_formula = (
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
@@ -592,25 +602,14 @@ def upsert_closing(payload: ClosingCreate):
         candidates = table.all(formula=date_formula, max_records=50)
 
         existing = None
-        normalized_target = normalize_store_value(store_name) if store_name else None
-
         for rec in candidates:
-            f = rec.get("fields", {})
-
-            linked_ids = f.get("Store") or []
-            if isinstance(linked_ids, list) and store_id and store_id in linked_ids:
+            linked_ids = rec.get("fields", {}).get("Store", [])
+            if isinstance(linked_ids, list) and store_id in linked_ids:
                 existing = rec
                 break
 
-            # Legacy fallback: match on Store Normalized
-            if not existing and normalized_target:
-                rec_norm = f.get("Store Normalized")
-                if isinstance(rec_norm, str) and normalize_store_value(rec_norm) == normalized_target:
-                    existing = rec
-                    break
-
         # --------------------------------------------------
-        # BUILD Fields payload (NO None values)
+        # 📝 Construct fields (NO Store Name ever sent)
         # --------------------------------------------------
         fields = {
             "Date": business_date,
@@ -633,26 +632,13 @@ def upsert_closing(payload: ClosingCreate):
             "Submitted By": payload.submitted_by,
             "Last Updated By": payload.submitted_by,
             "Last Updated At": datetime.now().isoformat(),
+            "Store": [store_id],      # <-- ALWAYS correct Airtable format
         }
 
-        # -----------------------------------
-        # ⭐ FIX: Always write Store as ARRAY
-        # -----------------------------------
-        if store_id:
-            fields["Store"] = [store_id]
-        elif store_name:
-            # Legacy name → attempt to resolve via store lookup table
-            resolved = lookup_store_id_from_name(store_name)
-            if not resolved:
-                raise HTTPException(400, f"Store name '{store_name}' cannot be resolved to ID.")
-            fields["Store"] = [resolved]
-
-        # Remove Nones
         fields = {k: v for k, v in fields.items() if v is not None}
-        fields = json.loads(json.dumps(fields, default=str))
 
         # --------------------------------------------------
-        # UPDATE EXISTING (must not be locked)
+        # 🔄 UPDATE EXISTING
         # --------------------------------------------------
         if existing:
             record_id = existing["id"]
@@ -662,60 +648,34 @@ def upsert_closing(payload: ClosingCreate):
             if current_lock in ["Locked", "Verified"]:
                 raise HTTPException(
                     status_code=403,
-                    detail=f"Record for {store_name or 'store'} on {business_date} is locked."
+                    detail=f"Record for date {business_date} is locked and cannot be modified.",
                 )
 
             fields["Lock Status"] = "Locked"
             updated = table.update(record_id, fields)
 
-            _log_history(
-                action="Updated",
-                store=store_name or current_fields.get("Store", "Unknown"),
-                business_date=business_date,
-                fields_snapshot=updated.get("fields", {}),
-                submitted_by=payload.submitted_by,
-                record_id=record_id,
-                lock_status=updated.get("fields", {}).get("Lock Status"),
-                changed_fields=list(fields.keys()),
-                tenant_id=tenant_id,
-            )
-
             return {
                 "status": "updated_locked",
                 "id": record_id,
-                "lock_status": updated.get("fields", {}).get("Lock Status"),
                 "fields": updated.get("fields", {}),
+                "lock_status": updated.get("fields", {}).get("Lock Status"),
             }
 
         # --------------------------------------------------
-        # CREATE NEW
+        # 🆕 CREATE NEW
         # --------------------------------------------------
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
 
-        _log_history(
-            action="Created",
-            store=store_name or "Unknown",
-            business_date=business_date,
-            fields_snapshot=created.get("fields", {}),
-            submitted_by=payload.submitted_by,
-            record_id=created.get("id"),
-            lock_status=created.get("fields", {}).get("Lock Status"),
-            changed_fields=list(fields.keys()),
-            tenant_id=tenant_id,
-        )
-
         return {
             "status": "created_locked",
             "id": created.get("id"),
-            "lock_status": created.get("fields", {}).get("Lock Status"),
             "fields": created.get("fields", {}),
+            "lock_status": created.get("fields", {}).get("Lock Status"),
         }
 
-    except HTTPException:
-        raise
     except Exception as e:
-        print("❌ Error during upsert:", e)
+        print("❌ UPSERT ERROR:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
