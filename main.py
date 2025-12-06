@@ -30,6 +30,9 @@ AIRTABLE_HISTORY_TABLE_ID = os.getenv("AIRTABLE_HISTORY_TABLE_ID")
 if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
     raise Exception("❌ Missing Airtable credentials — check Render Environment settings.")
 
+# 👉 NEW: Users table (by name, that's fine here)
+AIRTABLE_USERS = Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, "Users")
+
 # -----------------------------------------------------------
 # 🚀 FastAPI App Init
 # -----------------------------------------------------------
@@ -265,7 +268,7 @@ async def list_stores():
     return stores
 
 # -----------------------------------------------------------
-# 🔐 AUTH — Users List + Login (Updated for NEW Users table)
+# 🔐 AUTH — Users List + Login (using Airtable record ID)
 # -----------------------------------------------------------
 
 class UserLoginRequest(BaseModel):
@@ -277,20 +280,17 @@ class UserLoginRequest(BaseModel):
 def list_users():
     """
     Returns all ACTIVE users from Airtable Users table.
+
     Each user contains:
-    - user_id
+    - user_id  (Airtable record ID)
     - name
     - role
     - active
-    - store (linked)
-    - store_access (multi-linked)
+    - store:   { id, name } or null
+    - store_access: [ { id, name }, ... ]
     """
     try:
-        base_id = os.getenv("AIRTABLE_BASE_ID")
-        api_key = os.getenv("AIRTABLE_API_KEY")
-        table = Table(api_key, base_id, "Users")
-
-        records = table.all(formula="{Active}=TRUE()", max_records=200)
+        records = AIRTABLE_USERS.all(formula="{Active}=TRUE()", max_records=200)
 
         result = []
 
@@ -302,6 +302,7 @@ def list_users():
             if isinstance(fields.get("Stores"), list) and fields["Stores"]:
                 store_obj = {
                     "id": fields["Stores"][0],
+                    # Lookup field name from Stores table
                     "name": fields.get("Store (from Stores)")
                 }
 
@@ -316,10 +317,12 @@ def list_users():
                 })
 
             result.append({
-                "user_id": fields.get("User ID"),
+                # ✅ Use Airtable record ID as canonical user_id
+                "user_id": r.get("id"),
                 "name": fields.get("Name"),
-                "pin": str(fields.get("PIN")),
-                "role": fields.get("Role", "cashier").lower(),
+                # keep pin in payload if you like, or set to None for security
+                "pin": str(fields.get("PIN", "")),
+                "role": str(fields.get("Role", "cashier")).lower(),
                 "active": bool(fields.get("Active")),
                 "store": store_obj,
                 "store_access": store_access_list,
@@ -335,42 +338,36 @@ def list_users():
 @app.post("/auth/user-login")
 def user_login(payload: UserLoginRequest):
     """
-    Validates login using Users table:
-    Requires:
-    - user_id
-    - pin
-    - Active = TRUE
+    Validates login using Users table.
+
+    - `user_id` is the Airtable record ID (from /auth/users).
+    - Checks Active = TRUE and PIN match.
     """
-
     try:
-        base_id = os.getenv("AIRTABLE_BASE_ID")
-        api_key = os.getenv("AIRTABLE_API_KEY")
-        table = Table(api_key, base_id, "Users")
+        # 1) Fetch the record directly by Airtable record ID
+        record = AIRTABLE_USERS.get(payload.user_id)
+        if not record:
+            raise HTTPException(status_code=401, detail="Invalid user selection")
 
-        formula = (
-            f"AND("
-            f"{{User ID}} = '{payload.user_id}',"
-            f"{{PIN}} = '{payload.pin}',"
-            f"{{Active}} = TRUE()"
-            f")"
-        )
+        fields = record.get("fields", {})
 
-        records = table.all(formula=formula, max_records=1)
+        # 2) Must be active
+        if not bool(fields.get("Active")):
+            raise HTTPException(status_code=401, detail="User is inactive")
 
-        if not records:
-            raise HTTPException(status_code=401, detail="Invalid User ID or PIN")
+        # 3) PIN check
+        stored_pin = str(fields.get("PIN", ""))
+        if payload.pin != stored_pin:
+            raise HTTPException(status_code=401, detail="Invalid PIN")
 
-        fields = records[0]["fields"]
-
-        # Store
+        # 4) Build store + store_access objects
         store_obj = None
         if isinstance(fields.get("Stores"), list) and fields["Stores"]:
             store_obj = {
                 "id": fields["Stores"][0],
-                "name": fields.get("Store (from Stores)")
+                "name": fields.get("Store (from Stores)"),
             }
 
-        # Store Access
         store_access_list = []
         access_ids = fields.get("Store Access") or []
         access_names = fields.get("Store (from Store Access)") or []
@@ -380,10 +377,11 @@ def user_login(payload: UserLoginRequest):
                 "name": access_names[i] if i < len(access_names) else ""
             })
 
+        # 5) Return login payload
         return {
-            "user_id": fields.get("User ID"),
+            "user_id": record.get("id"),
             "name": fields.get("Name"),
-            "role": fields.get("Role", "cashier").lower(),
+            "role": str(fields.get("Role", "cashier")).lower(),
             "store": store_obj,
             "store_access": store_access_list,
         }
@@ -395,7 +393,7 @@ def user_login(payload: UserLoginRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # ------------------------------------------------------------
-# ⭐ ADMIN USER MANAGEMENT (Update Role, Active, Store)
+# ⭐ ADMIN USER MANAGEMENT (Update Role, Active, Store, Access)
 # ------------------------------------------------------------
 @app.patch("/admin/users/{user_id}")
 async def update_user(user_id: str, payload: dict):
@@ -405,9 +403,10 @@ async def update_user(user_id: str, payload: dict):
     - Role
     - Active (true/false)
     - Store (linked single record)
+    - Store Access (multi-linked)
     """
 
-    update_fields = {}
+    update_fields: Dict[str, object] = {}
 
     # Role change
     if "role" in payload:
@@ -417,11 +416,15 @@ async def update_user(user_id: str, payload: dict):
     if "active" in payload:
         update_fields["Active"] = bool(payload["active"])
 
-    # Change primary store
+    # Change primary store (linked field is "Stores")
     if "store_id" in payload:
-        update_fields["Store"] = (
+        update_fields["Stores"] = (
             [payload["store_id"]] if payload["store_id"] else []
         )
+
+    # Update store access (multi-linked "Store Access")
+    if "store_access_ids" in payload:
+        update_fields["Store Access"] = payload["store_access_ids"] or []
 
     try:
         updated = AIRTABLE_USERS.update(user_id, update_fields)
@@ -442,29 +445,27 @@ async def create_user(payload: dict):
         "pin": "1504",
         "role": "cashier",
         "active": true,
-        "store_id": "recXXXX",          # optional
-        "store_access": ["recYYY"]      # optional array
+        "store_id": "recXXXX",           # optional
+        "store_access_ids": ["recYYY"]   # optional array
     }
     """
     try:
-        table = AIRTABLE_USERS  # your Airtable users table
-
         fields = {
             "Name": payload.get("name"),
             "PIN": payload.get("pin"),
-            "Role": payload.get("role"),
+            "Role": payload.get("role", "cashier"),
             "Active": payload.get("active", True),
         }
 
-        # Assigned Store (single select)
+        # Assigned Store (single linked field "Stores")
         if payload.get("store_id"):
             fields["Stores"] = [payload["store_id"]]
 
-        # Store Access (multi select)
-        if payload.get("store_access"):
-            fields["Store Access"] = payload["store_access"]
+        # Store Access (multi linked "Store Access")
+        if payload.get("store_access_ids"):
+            fields["Store Access"] = payload["store_access_ids"]
 
-        created = table.create(fields)
+        created = AIRTABLE_USERS.create(fields)
 
         return {
             "status": "success",
