@@ -550,31 +550,21 @@ def _log_history(
 
 
 # -----------------------------------------------------------
-# 📌 UPSERT — Create or Update + Lock
+# 📌 UPSERT — Create or Update + Lock (FIXED Store handling)
 # -----------------------------------------------------------
 @app.post("/closings")
 def upsert_closing(payload: ClosingCreate):
-    """
-    Create or update a daily closing record in Airtable (upsert by store + date)
-    with validation and history logging.
-
-    ⭐ NEW:
-    - Prefers `store_id` (linked Store record ID) for uniqueness
-    - Still supports legacy `store` (name) for backwards compatibility
-    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Prefer store_id, but keep store name for display + history
-        store_id = (payload.store_id or "").strip() if getattr(
-            payload, "store_id", None) else ""
-        store_name = (payload.store or "").strip() if getattr(
-            payload, "store", None) else ""
+        # Prefer store_id (linked record ID)
+        store_id = (payload.store_id or "").strip()
+        store_name = (payload.store or "").strip()
 
         if not store_id and not store_name:
             raise HTTPException(
                 status_code=400,
-                detail="Either store_id or store (name) is required.",
+                detail="Either store_id or store (name) is required."
             )
 
         business_date = payload.business_date.isoformat()
@@ -582,23 +572,19 @@ def upsert_closing(payload: ClosingCreate):
         # Resolve tenant
         tenant_id = resolve_tenant_id(getattr(payload, "tenant_id", None))
 
-        # --- Validation ---
+        # --------------------------
+        # Validation
+        # --------------------------
         if payload.total_sales is not None and payload.total_sales < 0:
-            raise HTTPException(status_code=400,
-                                detail="Total sales cannot be negative.")
+            raise HTTPException(400, "Total sales cannot be negative.")
         if payload.net_sales is not None and payload.net_sales < 0:
-            raise HTTPException(status_code=400,
-                                detail="Net sales cannot be negative.")
+            raise HTTPException(400, "Net sales cannot be negative.")
         if (payload.total_sales is not None and payload.net_sales is not None
                 and payload.total_sales < payload.net_sales):
-            raise HTTPException(status_code=400,
-                                detail="Net sales cannot exceed total sales.")
+            raise HTTPException(400, "Net sales cannot exceed total sales.")
 
         # --------------------------------------------------
-        # Find existing record for this date + store
-        # 1) Filter by Date in Airtable
-        # 2) Match by store_id (linked) if provided
-        # 3) Fallback to legacy Store Normalized matching
+        # FIND EXISTING RECORD (Date + Store)
         # --------------------------------------------------
         date_formula = (
             f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
@@ -606,27 +592,26 @@ def upsert_closing(payload: ClosingCreate):
         candidates = table.all(formula=date_formula, max_records=50)
 
         existing = None
-        normalized_target = (normalize_store_value(store_name)
-                             if store_name else None)
+        normalized_target = normalize_store_value(store_name) if store_name else None
 
         for rec in candidates:
             f = rec.get("fields", {})
-            # Linked store IDs (Airtable returns list for linked fields)
+
             linked_ids = f.get("Store") or []
-            if isinstance(linked_ids,
-                          list) and store_id and store_id in linked_ids:
+            if isinstance(linked_ids, list) and store_id and store_id in linked_ids:
                 existing = rec
                 break
 
-            # Legacy fallback — match on Store Normalized text
+            # Legacy fallback: match on Store Normalized
             if not existing and normalized_target:
                 rec_norm = f.get("Store Normalized")
-                if isinstance(rec_norm, str) and normalize_store_value(
-                        rec_norm) == normalized_target:
+                if isinstance(rec_norm, str) and normalize_store_value(rec_norm) == normalized_target:
                     existing = rec
                     break
 
-        # Important: DO NOT send Store Normalized to Daily Closing (formula field)
+        # --------------------------------------------------
+        # BUILD Fields payload (NO None values)
+        # --------------------------------------------------
         fields = {
             "Date": business_date,
             "Tenant ID": tenant_id,
@@ -650,18 +635,25 @@ def upsert_closing(payload: ClosingCreate):
             "Last Updated At": datetime.now().isoformat(),
         }
 
-        # NEW: Set Store linked field
+        # -----------------------------------
+        # ⭐ FIX: Always write Store as ARRAY
+        # -----------------------------------
         if store_id:
-            # Proper linked-record payload
             fields["Store"] = [store_id]
         elif store_name:
-            # Legacy behaviour — Airtable will coerce via name matching
-            fields["Store"] = store_name
+            # Legacy name → attempt to resolve via store lookup table
+            resolved = lookup_store_id_from_name(store_name)
+            if not resolved:
+                raise HTTPException(400, f"Store name '{store_name}' cannot be resolved to ID.")
+            fields["Store"] = [resolved]
 
+        # Remove Nones
         fields = {k: v for k, v in fields.items() if v is not None}
         fields = json.loads(json.dumps(fields, default=str))
 
-        # --- Existing record → update ---
+        # --------------------------------------------------
+        # UPDATE EXISTING (must not be locked)
+        # --------------------------------------------------
         if existing:
             record_id = existing["id"]
             current_fields = existing.get("fields", {})
@@ -670,8 +662,7 @@ def upsert_closing(payload: ClosingCreate):
             if current_lock in ["Locked", "Verified"]:
                 raise HTTPException(
                     status_code=403,
-                    detail=
-                    f"Record for {store_name or 'store'} on {business_date} is locked and cannot be modified.",
+                    detail=f"Record for {store_name or 'store'} on {business_date} is locked."
                 )
 
             fields["Lock Status"] = "Locked"
@@ -690,17 +681,15 @@ def upsert_closing(payload: ClosingCreate):
             )
 
             return {
-                "status":
-                "updated_locked",
-                "id":
-                record_id,
-                "lock_status":
-                updated.get("fields", {}).get("Lock Status", "Locked"),
-                "fields":
-                updated.get("fields", {}),
+                "status": "updated_locked",
+                "id": record_id,
+                "lock_status": updated.get("fields", {}).get("Lock Status"),
+                "fields": updated.get("fields", {}),
             }
 
-        # --- No record → create new ---
+        # --------------------------------------------------
+        # CREATE NEW
+        # --------------------------------------------------
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
 
@@ -719,8 +708,7 @@ def upsert_closing(payload: ClosingCreate):
         return {
             "status": "created_locked",
             "id": created.get("id"),
-            "lock_status": created.get("fields",
-                                       {}).get("Lock Status", "Locked"),
+            "lock_status": created.get("fields", {}).get("Lock Status"),
             "fields": created.get("fields", {}),
         }
 
@@ -729,7 +717,6 @@ def upsert_closing(payload: ClosingCreate):
     except Exception as e:
         print("❌ Error during upsert:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # -----------------------------------------------------------
 # 🔓 UNLOCK — Manager PIN
