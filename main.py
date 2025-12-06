@@ -41,6 +41,8 @@ AIRTABLE_USERS = Table(
     AIRTABLE_USERS_TABLE_ID
 )
 
+STORES_TABLE = "Stores"
+
 # -----------------------------------------------------------
 # 🚀 FastAPI App Init
 # -----------------------------------------------------------
@@ -74,13 +76,12 @@ async def options_handler(request: Request, rest_of_path: str):
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
-
 # -----------------------------------------------------------
 # 🔗 Airtable Helpers (STRICT mode using IDs)
 # -----------------------------------------------------------
 def _airtable_table(table_key: str) -> Table:
     """
-    Resolve logical table keys -> Airtable Table using table IDs.
+    Resolve logical table keys -> Airtable Table using strict table IDs.
     """
     base_id = os.getenv("AIRTABLE_BASE_ID")
     api_key = os.getenv("AIRTABLE_API_KEY")
@@ -99,14 +100,25 @@ def _airtable_table(table_key: str) -> Table:
             "name_env": "AIRTABLE_HISTORY_TABLE",
             "default_name": "Daily Closing History",
         },
+        "stores": {
+            "id_env": "AIRTABLE_STORES_TABLE_ID",
+            "name_env": None,  # We use only table ID for strict mode
+            "default_name": "Stores",
+        },
+        "users": {
+            "id_env": "AIRTABLE_USERS_TABLE_ID",
+            "name_env": None,
+            "default_name": "Users",
+        },
     }
 
     if table_key not in table_configs:
         raise RuntimeError(f"Unknown table key: {table_key}")
 
     cfg = table_configs[table_key]
+
     table_id = os.getenv(cfg["id_env"])
-    table_name = os.getenv(cfg["name_env"], cfg["default_name"])
+    table_name = cfg["default_name"]
 
     if not table_id:
         raise RuntimeError(
@@ -115,9 +127,13 @@ def _airtable_table(table_key: str) -> Table:
 
     return Table(api_key, base_id, table_id)
 
-
+# -----------------------------------------------------------
+# TABLE KEYS (used by _airtable_table)
+# -----------------------------------------------------------
 DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
+STORES_TABLE = "stores"
+USERS_TABLE = "users"
 
 DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo-tenant")
 
@@ -128,14 +144,40 @@ def resolve_tenant_id(explicit: Optional[str]) -> str:
 
 def normalize_store_value(store: Optional[str]) -> str:
     """
-    Central helper for normalizing store names (lowercase, strip, remove quotes).
-    Used both for history + legacy name-based filters.
+    Normalize store names to ensure consistent cross-table matching.
     """
-    return ((store
-             or "").lower().strip().replace("’",
-                                            "").replace("‘",
-                                                        "").replace("'", ""))
+    return ((store or "")
+            .lower()
+            .strip()
+            .replace("’", "")
+            .replace("‘", "")
+            .replace("'", ""))
 
+
+# -----------------------------------------------------------
+# 🆕 USERS + STORES TABLE OBJECTS  (Patch Block #4)
+# -----------------------------------------------------------
+# --- USERS TABLE ---
+AIRTABLE_USERS_TABLE_ID = os.getenv("AIRTABLE_USERS_TABLE_ID")
+if not AIRTABLE_USERS_TABLE_ID:
+    raise RuntimeError("Missing AIRTABLE_USERS_TABLE_ID")
+
+AIRTABLE_USERS = Table(
+    os.getenv("AIRTABLE_API_KEY"),
+    os.getenv("AIRTABLE_BASE_ID"),
+    AIRTABLE_USERS_TABLE_ID
+)
+
+# --- STORES TABLE ---
+AIRTABLE_STORES_TABLE_ID = os.getenv("AIRTABLE_STORES_TABLE_ID")
+if not AIRTABLE_STORES_TABLE_ID:
+    raise RuntimeError("Missing AIRTABLE_STORES_TABLE_ID")
+
+AIRTABLE_STORES = Table(
+    os.getenv("AIRTABLE_API_KEY"),
+    os.getenv("AIRTABLE_BASE_ID"),
+    AIRTABLE_STORES_TABLE_ID
+)
 
 # -----------------------------------------------------------
 # 🧩 Models
@@ -1053,27 +1095,42 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         if not existing:
             raise HTTPException(status_code=404, detail="Record not found")
 
+        # Current fields from Airtable
         fields = existing.get("fields", {})
+
+        # Apply updates
         for k, v in updates.items():
             fields[k] = v
 
         changed_keys = list(updates.keys())
+
+        # Push updates to Airtable
         updated = table.update(record_id, updates)
 
-        try:
-            _log_history(
-                action="Patched",
-                store=store_name,
-                business_date=business_date,
-                fields_snapshot=updated.get("fields", {}),
-                submitted_by=fields.get("Last Updated By"),
-                record_id=record_id,
-                lock_status=updated.get("fields", {}).get("Lock Status"),
-                changed_fields=changed_keys,
-                tenant_id=tenant_id,
-            )
-        except Exception as e:
-            print("⚠️ Failed to log patch history:", e)
+        # ----------------------------------------------------
+        # FIX: Extract Store, Date, Tenant ID safely for history logging
+        # ----------------------------------------------------
+        store_name = fields.get("Store")
+        if isinstance(store_name, list):
+            store_name = store_name[0] if store_name else None
+
+        business_date = fields.get("Date")
+        tenant_id = fields.get("Tenant ID") or DEFAULT_TENANT_ID
+
+        # ----------------------------------------------------
+        # Write History Log
+        # ----------------------------------------------------
+        _log_history(
+            action="Patched",
+            store=store_name,
+            business_date=business_date,
+            fields_snapshot=updated.get("fields", {}),
+            submitted_by=fields.get("Last Updated By"),
+            record_id=record_id,
+            lock_status=updated.get("fields", {}).get("Lock Status"),
+            changed_fields=changed_keys,
+            tenant_id=tenant_id,
+        )
 
         return {
             "status": "patched",
@@ -1084,9 +1141,8 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
     except HTTPException:
         raise
     except Exception as e:
-        print("❌ Error in patch_closing:", e)
+        print("❌ Error during patch:", e)
         raise HTTPException(status_code=500, detail=str(e))
-
 
 # -----------------------------------------------------------
 # 📜 History read (admin view)
@@ -1148,20 +1204,36 @@ def verify_closing(payload: VerifyPayload):
         record_id = payload.record_id
         status = payload.status.strip().capitalize()  # "Verified" / "Flagged"
 
+        # Fetch current record
         record = table.get(record_id)
         if not record:
             raise HTTPException(status_code=404, detail="Record not found")
 
         fields = record.get("fields", {})
 
+        # Fields being updated in this verification step
         update_fields = {
             "Verified Status": status,
             "Verified By": payload.verified_by,
             "Verified At": datetime.now().isoformat(),
         }
 
+        # Apply verification update
         updated = table.update(record_id, update_fields)
 
+        # ----------------------------------------------------
+        # FIX: Extract Store, Date, Tenant ID safely for history logging
+        # ----------------------------------------------------
+        store_name = fields.get("Store")
+        if isinstance(store_name, list):
+            store_name = store_name[0] if store_name else None
+
+        business_date = fields.get("Date")
+        tenant_id = fields.get("Tenant ID") or DEFAULT_TENANT_ID
+
+        # ----------------------------------------------------
+        # Log history entry
+        # ----------------------------------------------------
         try:
             _log_history(
                 action=f"Verification - {status}",
@@ -1177,11 +1249,13 @@ def verify_closing(payload: VerifyPayload):
         except Exception as e:
             print("⚠️ Failed to log verification history:", e)
 
+        # Success response
         return {
             "status": "ok",
             "record_id": record_id,
             "verified_status": status,
         }
+
     except HTTPException:
         raise
     except Exception as e:
