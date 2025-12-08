@@ -699,19 +699,6 @@ def upsert_closing(payload: ClosingCreate):
                     f"Sum of payments ({payments_sum}) must equal Total Sales ({payload.total_sales}).",
                 )
 
-        # 3️⃣ Cash logic check
-        if (
-            payload.actual_cash_counted is not None
-            and payload.cash_float is not None
-            and payload.cash_for_deposit is not None
-        ):
-            expected_deposit = payload.actual_cash_counted - payload.cash_float
-            if abs(expected_deposit - payload.cash_for_deposit) > 1:
-                raise HTTPException(
-                    400,
-                    f"Cash for Deposit should be {expected_deposit} based on Actual Cash Counted minus Cash Float.",
-                )
-
         # 4️⃣ Total Budgets ≤ Net Sales
         budget_total = (
             (payload.kitchen_budget or 0)
@@ -863,6 +850,7 @@ def upsert_closing(payload: ClosingCreate):
 # 🔓 UNLOCK — Manager PIN
 # -----------------------------------------------------------
 def _constant_time_equal(a: str, b: str) -> bool:
+    """Prevents timing attacks — safe string comparison."""
     if len(a) != len(b):
         return False
     result = 0
@@ -874,44 +862,52 @@ def _constant_time_equal(a: str, b: str) -> bool:
 @app.post("/closings/{record_id}/unlock")
 def unlock_closing(record_id: str, payload: UnlockPayload):
     """
-    Unlock a record using Manager PIN.
+    Unlock a closing record using Manager PIN.
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         record = table.get(record_id)
 
         if not record:
-            raise HTTPException(404, "Record not found")
+            raise HTTPException(status_code=404, detail="Record not found")
 
-        # Validate PIN (can swap to _constant_time_equal if desired)
-        manager_pin = os.getenv("MANAGER_PIN", "")
-        if payload.pin != manager_pin:
-            raise HTTPException(401, "Invalid PIN")
+        # ------------------------------------------------------------------
+        # ⭐ FIXED: Proper PIN loading + sanitization
+        # ------------------------------------------------------------------
+        manager_pin = (os.getenv("MANAGER_PIN") or "").strip()
+        incoming_pin = str(payload.pin).strip()
 
+        if not _constant_time_equal(incoming_pin, manager_pin):
+            raise HTTPException(status_code=401, detail="Invalid PIN")
+
+        # Prepare updates
         updates = {
             "Lock Status": "Unlocked",
             "Unlocked At": datetime.now().isoformat(),
-            # No submitted_by on UnlockPayload, so we hard-code a label
             "Unlocked By": "Manager PIN",
         }
 
         updated = table.update(record_id, updates)
 
-        # Refresh to include formula fields (Variance, Cash for Deposit, etc.)
+        # Refresh to include formula fields
         fresh = table.get(record_id)
+        fields = fresh.get("fields", {})
 
-        # Log history (best-effort)
+        # Resolve store name in a safe, guaranteed way
+        store_value = fields.get("Store Normalized") or fields.get("Store") or ""
+
+        # Log history (best effort)
         try:
             _log_history(
                 action="Unlocked",
-                store=fresh["fields"].get("Store Name"),
-                business_date=fresh["fields"].get("Date"),
-                fields_snapshot=fresh["fields"],
+                store=store_value,
+                business_date=fields.get("Date"),
+                fields_snapshot=fields,
                 submitted_by="Manager PIN",
                 record_id=record_id,
-                lock_status=fresh["fields"].get("Lock Status"),
+                lock_status=fields.get("Lock Status"),
                 changed_fields=list(updates.keys()),
-                tenant_id=fresh["fields"].get("Tenant ID") or DEFAULT_TENANT_ID,
+                tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
             )
         except Exception as e:
             print("⚠️ Unlock history failed:", e)
