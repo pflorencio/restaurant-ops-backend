@@ -43,6 +43,13 @@ AIRTABLE_USERS = Table(
 
 STORES_TABLE = "Stores"
 
+# Airtable formula fields (must never be updated via API)
+FORMULA_FIELDS = [
+    "Total Budgets",
+    "Variance",
+    "Cash for Deposit",
+]
+
 # -----------------------------------------------------------
 # 🚀 FastAPI App Init
 # -----------------------------------------------------------
@@ -79,10 +86,8 @@ async def options_handler(request: Request, rest_of_path: str):
 # -----------------------------------------------------------
 # 🔗 Airtable Helpers (STRICT mode using IDs)
 # -----------------------------------------------------------
+
 def _airtable_table(table_key: str) -> Table:
-    """
-    Resolve logical table keys -> Airtable Table using strict table IDs.
-    """
     base_id = os.getenv("AIRTABLE_BASE_ID")
     api_key = os.getenv("AIRTABLE_API_KEY")
 
@@ -92,22 +97,18 @@ def _airtable_table(table_key: str) -> Table:
     table_configs = {
         "daily_closing": {
             "id_env": "AIRTABLE_DAILY_CLOSINGS_TABLE_ID",
-            "name_env": "AIRTABLE_DAILY_CLOSINGS_TABLE",
             "default_name": "Daily Closing",
         },
         "history": {
             "id_env": "AIRTABLE_HISTORY_TABLE_ID",
-            "name_env": "AIRTABLE_HISTORY_TABLE",
             "default_name": "Daily Closing History",
         },
         "stores": {
             "id_env": "AIRTABLE_STORES_TABLE_ID",
-            "name_env": None,  # We use only table ID for strict mode
             "default_name": "Stores",
         },
         "users": {
             "id_env": "AIRTABLE_USERS_TABLE_ID",
-            "name_env": None,
             "default_name": "Users",
         },
     }
@@ -116,19 +117,16 @@ def _airtable_table(table_key: str) -> Table:
         raise RuntimeError(f"Unknown table key: {table_key}")
 
     cfg = table_configs[table_key]
-
     table_id = os.getenv(cfg["id_env"])
-    table_name = cfg["default_name"]
 
     if not table_id:
-        raise RuntimeError(
-            f"{cfg['id_env']} is not set. Intended table name is '{table_name}'."
-        )
+        raise RuntimeError(f"Missing table ID for {table_key} → {cfg['id_env']}")
 
     return Table(api_key, base_id, table_id)
 
+
 # -----------------------------------------------------------
-# TABLE KEYS (used by _airtable_table)
+# TABLE KEYS
 # -----------------------------------------------------------
 DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
@@ -143,9 +141,6 @@ def resolve_tenant_id(explicit: Optional[str]) -> str:
 
 
 def normalize_store_value(store: Optional[str]) -> str:
-    """
-    Normalize store names to ensure consistent cross-table matching.
-    """
     return ((store or "")
             .lower()
             .strip()
@@ -155,9 +150,8 @@ def normalize_store_value(store: Optional[str]) -> str:
 
 
 # -----------------------------------------------------------
-# 🆕 USERS + STORES TABLE OBJECTS  (Patch Block #4)
+# USERS TABLE OBJECT
 # -----------------------------------------------------------
-# --- USERS TABLE ---
 AIRTABLE_USERS_TABLE_ID = os.getenv("AIRTABLE_USERS_TABLE_ID")
 if not AIRTABLE_USERS_TABLE_ID:
     raise RuntimeError("Missing AIRTABLE_USERS_TABLE_ID")
@@ -168,7 +162,9 @@ AIRTABLE_USERS = Table(
     AIRTABLE_USERS_TABLE_ID
 )
 
-# --- STORES TABLE ---
+# -----------------------------------------------------------
+# STORES TABLE OBJECT
+# -----------------------------------------------------------
 AIRTABLE_STORES_TABLE_ID = os.getenv("AIRTABLE_STORES_TABLE_ID")
 if not AIRTABLE_STORES_TABLE_ID:
     raise RuntimeError("Missing AIRTABLE_STORES_TABLE_ID")
@@ -540,19 +536,18 @@ async def create_user(payload: dict):
 def _safe_serialize(obj):
     if isinstance(obj, (datetime, dt_date)):
         return obj.isoformat()
-    elif isinstance(obj, dict):
+    if isinstance(obj, dict):
         return {k: _safe_serialize(v) for k, v in obj.items()}
-    elif isinstance(obj, list):
+    if isinstance(obj, list):
         return [_safe_serialize(v) for v in obj]
-    elif isinstance(obj, tuple):
+    if isinstance(obj, tuple):
         return tuple(_safe_serialize(v) for v in obj)
     return obj
-
 
 def _log_history(
     *,
     action: str,
-    store: str,
+    store: Optional[str],
     business_date: str,
     fields_snapshot: dict,
     submitted_by: Optional[str] = None,
@@ -561,60 +556,49 @@ def _log_history(
     changed_fields: Optional[List[str]] = None,
     tenant_id: Optional[str] = None,
 ):
-    """
-    Write one row to Daily Closing History with full snapshot JSON.
-
-    Now robust to:
-    - Store being a linked record (list of IDs)
-    - Store being missing/empty
-    - Deriving the store name from the snapshot when possible
-    """
     try:
-        table = _airtable_table(HISTORY_TABLE)
-        changed_csv = ", ".join(changed_fields) if changed_fields else None
-        safe_snapshot = _safe_serialize(fields_snapshot)
+        history_table = _airtable_table(HISTORY_TABLE)
 
-        # Derive a human-readable store name as best as we can
-        raw_store = store
+        # Resolve store name safely (linked or text)
+        store_name = store or ""
+        snap = fields_snapshot or {}
 
-        # 1) Sometimes Airtable returns linked fields as a list
-        if isinstance(raw_store, list):
-            raw_store = raw_store[0] if raw_store else None
+        # If store is a linked-record list, resolve name
+        store_ids = snap.get("Store")
+        if isinstance(store_ids, list) and len(store_ids) > 0:
+            try:
+                store_rec = AIRTABLE_STORES.get(store_ids[0])
+                store_name = store_rec.get("fields", {}).get("Store") or store_name
+            except Exception:
+                pass
 
-        # 2) If we still don't have a name, try to infer from the snapshot
-        if (not raw_store) and isinstance(fields_snapshot, dict):
-            fs = fields_snapshot
-            candidate = (
-                fs.get("Store Name")
-                or fs.get("Store Display")
-                or fs.get("Store Normalized")
-                or fs.get("Store")
+        if not store_name:
+            store_name = (
+                snap.get("Store Name")
+                or snap.get("Store Display")
+                or snap.get("Store Normalized")
+                or snap.get("Store")
+                or "Unknown"
             )
-            if isinstance(candidate, list):
-                candidate = candidate[0] if candidate else None
-            raw_store = candidate
 
-        # 3) Final fallback
-        if not raw_store:
-            raw_store = "Unknown"
-
-        normalized_store = normalize_store_value(str(raw_store))
+        normalized = normalize_store_value(store_name)
 
         payload = {
-            "Date": str(business_date),
-            "Store": raw_store,
-            "Store Normalized": normalized_store,
+            "Date": business_date,
+            "Store": store_name,
+            "Store Normalized": normalized,
             "Tenant ID": tenant_id or DEFAULT_TENANT_ID,
             "Action": action,
             "Changed By": submitted_by,
             "Timestamp": datetime.now().isoformat(),
             "Record ID": record_id,
             "Lock Status": lock_status,
-            "Changed Fields": changed_csv,
-            "Snapshot": json.dumps(safe_snapshot, ensure_ascii=False),
+            "Changed Fields": ", ".join(changed_fields) if changed_fields else None,
+            "Snapshot": json.dumps(_safe_serialize(snap), ensure_ascii=False),
         }
 
-        table.create(payload)
+        history_table.create(payload)
+
     except Exception as e:
         print("⚠️ Failed to log history:", e)
 
@@ -627,6 +611,7 @@ def upsert_closing(payload: ClosingCreate):
     Create or update a daily closing record in Airtable.
     Prefers store_id (linked Store) but still accepts store name for compatibility.
     """
+
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
@@ -643,77 +628,35 @@ def upsert_closing(payload: ClosingCreate):
         tenant_id = resolve_tenant_id(getattr(payload, "tenant_id", None))
 
         # -----------------------------------------
-        # ❗ Resolve store name from store_id if missing
+        # Resolve store name from linked table if missing
         # -----------------------------------------
         if not store_name and store_id:
             try:
-                store_table = _airtable_table(STORES_TABLE)
-                rec = store_table.get(store_id)
-                store_name = rec.get("fields", {}).get("Name", "")
-                print(f"Resolved store_name from store_id → {store_name}")
+                rec = AIRTABLE_STORES.get(store_id)
+                store_name = rec.get("fields", {}).get("Store", "")
+                print(f"Resolved store_name → {store_name}")
             except Exception as e:
-                print("⚠️ Unable to resolve store name from store_id:", e)
+                print("⚠️ Could not resolve linked store name:", e)
 
         if not store_id and not store_name:
             raise HTTPException(
-                status_code=400,
-                detail="Either store_id or store (name) is required."
+                400, "Either store_id or store name is required."
             )
 
         # -----------------------------------------
-        # Validation
+        # VALIDATION RULES
         # -----------------------------------------
-        if payload.total_sales is not None and payload.total_sales < 0:
-            raise HTTPException(400, "Total sales cannot be negative.")
-        if payload.net_sales is not None and payload.net_sales < 0:
-            raise HTTPException(400, "Net sales cannot be negative.")
-        if (
-            payload.total_sales is not None and 
-            payload.net_sales is not None and 
-            payload.total_sales < payload.net_sales
-        ):
-            raise HTTPException(400, "Net sales cannot exceed total sales.")
+        import math
 
-        # -----------------------------------------
-        # Find existing record (Date + Store match)
-        # -----------------------------------------
-        date_formula = (
-            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
-        )
-        candidates = table.all(formula=date_formula, max_records=50)
-
-        existing = None
-        normalized_target = normalize_store_value(store_name) if store_name else None
-
-        for rec in candidates:
-            fields = rec.get("fields", {})
-
-            # Linked store IDs list
-            linked_ids = fields.get("Store") or []
-            if store_id and isinstance(linked_ids, list) and store_id in linked_ids:
-                existing = rec
-                break
-
-            if not existing and normalized_target:
-                rec_norm = normalize_store_value(fields.get("Store Normalized", ""))
-                if rec_norm == normalized_target:
-                    existing = rec
-                    break
-
-        # -----------------------------------------
-        # Build Airtable payload
-        # -----------------------------------------
-        fields = {
-            "Date": business_date,
-            "Tenant ID": tenant_id,
+        numeric_fields = {
             "Total Sales": payload.total_sales,
             "Net Sales": payload.net_sales,
             "Cash Payments": payload.cash_payments,
             "Card Payments": payload.card_payments,
             "Digital Payments": payload.digital_payments,
             "Grab Payments": payload.grab_payments,
-            "Bank Transfer Payments": payload.bank_transfer_payments,
             "Voucher Payments": payload.voucher_payments,
+            "Bank Transfer Payments": payload.bank_transfer_payments,
             "Marketing Expenses": payload.marketing_expenses,
             "Actual Cash Counted": payload.actual_cash_counted,
             "Cash Float": payload.cash_float,
@@ -721,43 +664,156 @@ def upsert_closing(payload: ClosingCreate):
             "Bar Budget": payload.bar_budget,
             "Non Food Budget": payload.non_food_budget,
             "Staff Meal Budget": payload.staff_meal_budget,
+        }
+
+        # Reject NaN, Infinity, negative numbers
+        for field_name, value in numeric_fields.items():
+            if value is not None:
+                if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                    raise HTTPException(400, f"{field_name} contains an invalid number.")
+                if value < 0:
+                    raise HTTPException(400, f"{field_name} cannot be negative.")
+
+        # 1️⃣ Net Sales ≤ Total Sales
+        if payload.total_sales is not None and payload.net_sales is not None:
+            if payload.net_sales > payload.total_sales:
+                raise HTTPException(
+                    400, "Net sales cannot exceed total sales."
+                )
+
+        # 2️⃣ Payments must reconcile
+        payments_sum = (
+            (payload.cash_payments or 0)
+            + (payload.card_payments or 0)
+            + (payload.digital_payments or 0)
+            + (payload.grab_payments or 0)
+            + (payload.voucher_payments or 0)
+            + (payload.bank_transfer_payments or 0)
+            + (payload.marketing_expenses or 0)
+        )
+
+        if payload.total_sales is not None:
+            if abs(payments_sum - payload.total_sales) > 1:
+                raise HTTPException(
+                    400,
+                    f"Sum of payments ({payments_sum}) must equal Total Sales ({payload.total_sales}).",
+                )
+
+        # 3️⃣ Cash logic check
+        if (
+            payload.actual_cash_counted is not None
+            and payload.cash_float is not None
+            and payload.cash_for_deposit is not None
+        ):
+            expected_deposit = payload.actual_cash_counted - payload.cash_float
+            if abs(expected_deposit - payload.cash_for_deposit) > 1:
+                raise HTTPException(
+                    400,
+                    f"Cash for Deposit should be {expected_deposit} based on Actual Cash Counted minus Cash Float.",
+                )
+
+        # 4️⃣ Total Budgets ≤ Net Sales
+        budget_total = (
+            (payload.kitchen_budget or 0)
+            + (payload.bar_budget or 0)
+            + (payload.non_food_budget or 0)
+            + (payload.staff_meal_budget or 0)
+        )
+
+        if payload.net_sales is not None and budget_total > payload.net_sales:
+            raise HTTPException(
+                400,
+                f"Total budget allocation ({budget_total}) cannot exceed Net Sales ({payload.net_sales}).",
+            )
+
+        # -----------------------------------------
+        # FIND EXISTING RECORD (store + date)
+        # -----------------------------------------
+        date_formula = (
+            f"IS_SAME({{Date}}, DATETIME_PARSE('{business_date}', 'YYYY-MM-DD'), 'day')"
+        )
+        candidates = table.all(formula=date_formula, max_records=50)
+
+        existing = None
+        normalized_target = normalize_store_value(store_name)
+
+        for rec in candidates:
+            fields = rec.get("fields", {})
+
+            linked_ids = fields.get("Store") or []
+            if store_id and isinstance(linked_ids, list) and store_id in linked_ids:
+                existing = rec
+                break
+
+            rec_norm = normalize_store_value(fields.get("Store Normalized", ""))
+            if rec_norm == normalized_target:
+                existing = rec
+                break
+
+        # -----------------------------------------
+        # PREPARE PAYLOAD FOR AIRTABLE
+        # -----------------------------------------
+        fields = {
+            "Date": business_date,
+            "Tenant ID": tenant_id,
             "Submitted By": payload.submitted_by,
             "Last Updated By": payload.submitted_by,
             "Last Updated At": datetime.now().isoformat(),
+            "Total Sales": payload.total_sales,
+            "Net Sales": payload.net_sales,
+            "Cash Payments": payload.cash_payments,
+            "Card Payments": payload.card_payments,
+            "Digital Payments": payload.digital_payments,
+            "Grab Payments": payload.grab_payments,
+            "Voucher Payments": payload.voucher_payments,
+            "Bank Transfer Payments": payload.bank_transfer_payments,
+            "Marketing Expenses": payload.marketing_expenses,
+            "Actual Cash Counted": payload.actual_cash_counted,
+            "Cash Float": payload.cash_float,
+            "Kitchen Budget": payload.kitchen_budget,
+            "Bar Budget": payload.bar_budget,
+            "Non Food Budget": payload.non_food_budget,
+            "Staff Meal Budget": payload.staff_meal_budget,
         }
 
         # Linked store
         if store_id:
             fields["Store"] = [store_id]
         else:
-            fields["Store"] = store_name  # legacy text
+            fields["Store"] = store_name
 
-        fields = {k: v for k, v in fields.items() if v is not None}
+        # Remove formula fields (these MUST NOT be sent)
+        for f in ["Variance", "Cash for Deposit", "Total Budgets"]:
+            fields.pop(f, None)
+
+        # Convert datetimes safely
         fields = json.loads(json.dumps(fields, default=str))
 
         # ===========================================================
-        # UPDATE existing record
+        # UPDATE EXISTING
         # ===========================================================
         if existing:
             rec_id = existing["id"]
-            current_fields = existing.get("fields", {})
-            lock = current_fields.get("Lock Status", "Unlocked")
+            lock_status = existing["fields"].get("Lock Status", "Unlocked")
 
-            if lock in ["Locked", "Verified"]:
+            if lock_status in ["Locked", "Verified"]:
                 raise HTTPException(403, f"Record for {store_name} on {business_date} is locked.")
 
             fields["Lock Status"] = "Locked"
+
             updated = table.update(rec_id, fields)
 
-            # Log history
+            # Fetch fresh copy including formula fields
+            fresh = table.get(rec_id)
+
             _log_history(
                 action="Updated",
                 store=store_name,
                 business_date=business_date,
-                fields_snapshot=updated.get("fields", {}),
+                fields_snapshot=fresh.get("fields", {}),
                 submitted_by=payload.submitted_by,
                 record_id=rec_id,
-                lock_status=updated["fields"].get("Lock Status"),
+                lock_status=fresh["fields"].get("Lock Status"),
                 changed_fields=list(fields.keys()),
                 tenant_id=tenant_id,
             )
@@ -765,33 +821,36 @@ def upsert_closing(payload: ClosingCreate):
             return {
                 "status": "updated_locked",
                 "id": rec_id,
-                "lock_status": updated["fields"].get("Lock Status", "Locked"),
-                "fields": updated["fields"],
+                "lock_status": fresh["fields"].get("Lock Status", "Locked"),
+                "fields": fresh["fields"],
             }
 
         # ===========================================================
-        # CREATE new record
+        # CREATE NEW
         # ===========================================================
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
+
+        # Fetch fresh copy including formulas
+        fresh = table.get(created["id"])
 
         _log_history(
             action="Created",
             store=store_name,
             business_date=business_date,
-            fields_snapshot=created.get("fields", {}),
+            fields_snapshot=fresh.get("fields", {}),
             submitted_by=payload.submitted_by,
-            record_id=created.get("id"),
-            lock_status=created["fields"].get("Lock Status"),
+            record_id=fresh.get("id"),
+            lock_status=fresh["fields"].get("Lock Status"),
             changed_fields=list(fields.keys()),
             tenant_id=tenant_id,
         )
 
         return {
             "status": "created_locked",
-            "id": created.get("id"),
-            "lock_status": created["fields"].get("Lock Status", "Locked"),
-            "fields": created["fields"],
+            "id": fresh.get("id"),
+            "lock_status": fresh["fields"].get("Lock Status", "Locked"),
+            "fields": fresh["fields"],
         }
 
     except HTTPException:
@@ -811,94 +870,58 @@ def _constant_time_equal(a: str, b: str) -> bool:
         result |= ord(x) ^ ord(y)
     return result == 0
 
+
 @app.post("/closings/{record_id}/unlock")
 def unlock_closing(record_id: str, payload: UnlockPayload):
-    """Unlock a record for editing (manager only)."""
+    """
+    Unlock a record using Manager PIN.
+    """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
+        record = table.get(record_id)
+
+        if not record:
+            raise HTTPException(404, "Record not found")
+
+        # Validate PIN (can swap to _constant_time_equal if desired)
         manager_pin = os.getenv("MANAGER_PIN", "")
+        if payload.pin != manager_pin:
+            raise HTTPException(401, "Invalid PIN")
 
-        # Debug: help diagnose PIN issues without logging the actual PIN value
-        provided_pin = payload.pin or ""
-        print(
-            "🔐 Unlock attempt",
-            {
-                "provided_len": len(provided_pin),
-                "expected_len": len(manager_pin),
-                "pins_match": _constant_time_equal(provided_pin, manager_pin),
-            },
-        )
-
-        if not manager_pin:
-            raise HTTPException(
-                status_code=500,
-                detail="Manager PIN is not configured on the server.",
-            )
-
-        if not _constant_time_equal(provided_pin, manager_pin):
-            raise HTTPException(status_code=401, detail="Invalid manager PIN.")
-
-        # Load the existing record
-        existing = table.get(record_id)
-        if not existing:
-            raise HTTPException(status_code=404, detail="Record not found.")
-
-        fields = existing.get("fields", {})
-
-        # If already unlocked or verified, we still log but do not change status.
-        current_lock = fields.get("Lock Status", "Locked")
-        if current_lock in ["Unlocked", "Verified"]:
-            _log_history(
-                action="Unlocked (noop)",
-                store=fields.get("Store"),
-                business_date=fields.get("Date", ""),
-                fields_snapshot=fields,
-                submitted_by="Manager PIN",
-                record_id=record_id,
-                lock_status=current_lock,
-                changed_fields=[],
-                tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
-            )
-            return {
-                "status": "already_unlocked",
-                "id": record_id,
-                "lock_status": current_lock,
-                "fields": fields,
-            }
-
-        # Update lock status + timestamp + last updated by
-        update_fields = {
+        updates = {
             "Lock Status": "Unlocked",
             "Unlocked At": datetime.now().isoformat(),
-            "Last Updated By": "Manager PIN",
+            # No submitted_by on UnlockPayload, so we hard-code a label
+            "Unlocked By": "Manager PIN",
         }
 
-        updated = table.update(record_id, update_fields)
-        fields = updated.get("fields", {})
+        updated = table.update(record_id, updates)
 
-        # Log history
-        _log_history(
-            action="Unlocked",
-            store=fields.get("Store"),
-            business_date=fields.get("Date", ""),
-            fields_snapshot=fields,
-            submitted_by="Manager PIN",
-            record_id=record_id,
-            lock_status=fields.get("Lock Status"),
-            changed_fields=list(update_fields.keys()),
-            tenant_id=fields.get("Tenant ID") or DEFAULT_TENANT_ID,
-        )
+        # Refresh to include formula fields (Variance, Cash for Deposit, etc.)
+        fresh = table.get(record_id)
 
-        return {
-            "status": "unlocked",
-            "id": record_id,
-            "lock_status": fields.get("Lock Status", "Unlocked"),
-            "fields": fields,
-        }
+        # Log history (best-effort)
+        try:
+            _log_history(
+                action="Unlocked",
+                store=fresh["fields"].get("Store Name"),
+                business_date=fresh["fields"].get("Date"),
+                fields_snapshot=fresh["fields"],
+                submitted_by="Manager PIN",
+                record_id=record_id,
+                lock_status=fresh["fields"].get("Lock Status"),
+                changed_fields=list(updates.keys()),
+                tenant_id=fresh["fields"].get("Tenant ID") or DEFAULT_TENANT_ID,
+            )
+        except Exception as e:
+            print("⚠️ Unlock history failed:", e)
+
+        return fresh
+
     except HTTPException:
         raise
     except Exception as e:
-        print("❌ Error in unlock_closing:", e)
+        print("❌ Unlock error:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
@@ -1075,14 +1098,18 @@ def list_closings(
         print("❌ Error listing closings:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-
 # -----------------------------------------------------------
 # ✏️ Inline update (PATCH /closings/{record_id})
 # -----------------------------------------------------------
 @app.patch("/closings/{record_id}")
 def patch_closing(record_id: str, payload: ClosingUpdate):
     """
-    Update one or more fields on a closing record.
+    Update individual fields of a daily closing record (admin inline edit).
+
+    - Merges the incoming patch with the existing record
+    - Applies the same validation rules as /closings (upsert)
+    - Prevents updating Airtable formula fields
+    - Logs a 'Patched' entry into Daily Closing History
     """
     try:
         updates = payload.root or {}
@@ -1090,58 +1117,173 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
             raise HTTPException(status_code=400,
                                 detail="Payload must be a non-empty object")
 
+        # Never allow formula fields to be patched directly
+        for f in FORMULA_FIELDS:
+            updates.pop(f, None)
+
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         existing = table.get(record_id)
+
         if not existing:
             raise HTTPException(status_code=404, detail="Record not found")
 
-        # Current fields from Airtable
-        fields = existing.get("fields", {})
+        fields_before = existing.get("fields", {})
 
-        # Apply updates
-        for k, v in updates.items():
-            fields[k] = v
+        # Respect lock status (same behaviour as /closings upsert)
+        lock_status = fields_before.get("Lock Status", "Unlocked")
+        if lock_status in ["Locked", "Verified"]:
+            raise HTTPException(
+                status_code=403,
+                detail="Record is locked or verified and cannot be edited. "
+                       "Please unlock before editing.",
+            )
 
-        changed_keys = list(updates.keys())
+        # Build merged snapshot as if this were the new full record
+        merged = dict(fields_before)
+        merged.update(updates)
 
-        # Push updates to Airtable
+        # -----------------------------------------
+        # Validation — mirror /closings logic
+        # -----------------------------------------
+        import math
+
+        # Map Airtable numeric fields from merged snapshot
+        numeric_values = {
+            "Total Sales": merged.get("Total Sales"),
+            "Net Sales": merged.get("Net Sales"),
+            "Cash Payments": merged.get("Cash Payments"),
+            "Card Payments": merged.get("Card Payments"),
+            "Digital Payments": merged.get("Digital Payments"),
+            "Grab Payments": merged.get("Grab Payments"),
+            "Voucher Payments": merged.get("Voucher Payments"),
+            "Bank Transfer Payments": merged.get("Bank Transfer Payments"),
+            "Marketing Expenses": merged.get("Marketing Expenses"),
+            "Actual Cash Counted": merged.get("Actual Cash Counted"),
+            "Cash Float": merged.get("Cash Float"),
+            "Kitchen Budget": merged.get("Kitchen Budget"),
+            "Bar Budget": merged.get("Bar Budget"),
+            "Non Food Budget": merged.get("Non Food Budget"),
+            "Staff Meal Budget": merged.get("Staff Meal Budget"),
+            "Cash for Deposit": merged.get("Cash for Deposit"),
+        }
+
+        # 0️⃣ Reject NaN / Infinity / negatives
+        for field_name, value in numeric_values.items():
+            if value is not None:
+                if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{field_name} contains an invalid number."
+                    )
+                if value < 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"{field_name} cannot be negative."
+                    )
+
+        total_sales = numeric_values["Total Sales"]
+        net_sales = numeric_values["Net Sales"]
+        cash_payments = numeric_values["Cash Payments"] or 0
+        card_payments = numeric_values["Card Payments"] or 0
+        digital_payments = numeric_values["Digital Payments"] or 0
+        grab_payments = numeric_values["Grab Payments"] or 0
+        voucher_payments = numeric_values["Voucher Payments"] or 0
+        bank_transfer = numeric_values["Bank Transfer Payments"] or 0
+        marketing_expenses = numeric_values["Marketing Expenses"] or 0
+        actual_cash = numeric_values["Actual Cash Counted"]
+        cash_float = numeric_values["Cash Float"]
+        cash_for_deposit = numeric_values["Cash for Deposit"]
+        kitchen_budget = numeric_values["Kitchen Budget"] or 0
+        bar_budget = numeric_values["Bar Budget"] or 0
+        non_food_budget = numeric_values["Non Food Budget"] or 0
+        staff_meal_budget = numeric_values["Staff Meal Budget"] or 0
+
+        # 1️⃣ Net Sales ≤ Total Sales
+        if total_sales is not None and net_sales is not None:
+            if net_sales > total_sales:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Net sales cannot exceed total sales."
+                )
+
+        # 2️⃣ Σ Payments must ≈ Total Sales (±1 PHP)
+        if total_sales is not None:
+            payments_sum = (
+                cash_payments
+                + card_payments
+                + digital_payments
+                + grab_payments
+                + voucher_payments
+                + bank_transfer
+                + marketing_expenses
+            )
+            if abs(payments_sum - total_sales) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Sum of payments ({payments_sum}) must equal "
+                        f"Total Sales ({total_sales}) within ±₱1."
+                    ),
+                )
+
+        # 3️⃣ Cash reconciliation: Cash for Deposit ≈ Actual Cash - Float
+        if actual_cash is not None and cash_float is not None and cash_for_deposit is not None:
+            expected_deposit = actual_cash - cash_float
+            if abs(expected_deposit - cash_for_deposit) > 1:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        f"Cash for Deposit should be {expected_deposit} "
+                        f"based on Actual Cash Counted minus Cash Float."
+                    ),
+                )
+
+        # 4️⃣ Budgets cannot exceed Net Sales
+        budget_total = kitchen_budget + bar_budget + non_food_budget + staff_meal_budget
+        if net_sales is not None and budget_total > net_sales:
+            raise HTTPException(
+                status_code=400,
+                detail=(
+                    f"Total budget allocation ({budget_total}) cannot exceed "
+                    f"Net Sales ({net_sales})."
+                ),
+            )
+
+        # -----------------------------------------
+        # Apply PATCH to Airtable
+        # -----------------------------------------
+        # Never send formula fields even if someone tried to patch them
+        for f in FORMULA_FIELDS:
+            updates.pop(f, None)
+
         updated = table.update(record_id, updates)
 
-        # ----------------------------------------------------
-        # FIX: Extract Store, Date, Tenant ID safely for history logging
-        # ----------------------------------------------------
-        store_name = fields.get("Store")
-        if isinstance(store_name, list):
-            store_name = store_name[0] if store_name else None
+        # Fetch fresh record including formula values after Airtable recalculation
+        fresh = table.get(record_id)
+        changed_keys = list(updates.keys())
 
-        business_date = fields.get("Date")
-        tenant_id = fields.get("Tenant ID") or DEFAULT_TENANT_ID
+        # Log history
+        try:
+            _log_history(
+                action="Patched",
+                store=fresh["fields"].get("Store Name"),
+                business_date=fresh["fields"].get("Date"),
+                fields_snapshot=fresh["fields"],
+                submitted_by=fresh["fields"].get("Last Updated By"),
+                record_id=record_id,
+                lock_status=fresh["fields"].get("Lock Status"),
+                changed_fields=changed_keys,
+                tenant_id=fresh["fields"].get("Tenant ID") or DEFAULT_TENANT_ID,
+            )
+        except Exception as e:
+            print("⚠️ Failed to log patch history:", e)
 
-        # ----------------------------------------------------
-        # Write History Log
-        # ----------------------------------------------------
-        _log_history(
-            action="Patched",
-            store=store_name,
-            business_date=business_date,
-            fields_snapshot=updated.get("fields", {}),
-            submitted_by=fields.get("Last Updated By"),
-            record_id=record_id,
-            lock_status=updated.get("fields", {}).get("Lock Status"),
-            changed_fields=changed_keys,
-            tenant_id=tenant_id,
-        )
-
-        return {
-            "status": "patched",
-            "id": record_id,
-            "fields": updated.get("fields", {}),
-        }
+        return fresh
 
     except HTTPException:
         raise
     except Exception as e:
-        print("❌ Error during patch:", e)
+        print("❌ Error in patch_closing:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
@@ -1196,72 +1338,51 @@ def get_history(
 @app.post("/verify")
 def verify_closing(payload: VerifyPayload):
     """
-    Mark a closing record as Verified or Flagged, log history, and
-    leave the row otherwise unchanged.
+    Mark a record as Verified or Flagged and log the action.
     """
+
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
         record_id = payload.record_id
-        status = payload.status.strip().capitalize()  # "Verified" / "Flagged"
 
-        # Fetch current record
         record = table.get(record_id)
         if not record:
-            raise HTTPException(status_code=404, detail="Record not found")
+            raise HTTPException(404, "Record not found")
 
-        fields = record.get("fields", {})
+        status = payload.status.strip().capitalize()
 
-        # Fields being updated in this verification step
         update_fields = {
             "Verified Status": status,
             "Verified By": payload.verified_by,
             "Verified At": datetime.now().isoformat(),
         }
 
-        # Apply verification update
         updated = table.update(record_id, update_fields)
 
-        # ----------------------------------------------------
-        # FIX: Extract Store, Date, Tenant ID safely for history logging
-        # ----------------------------------------------------
-        store_name = fields.get("Store")
-        if isinstance(store_name, list):
-            store_name = store_name[0] if store_name else None
+        # Refresh to capture Airtable formula fields
+        fresh = table.get(record_id)
 
-        business_date = fields.get("Date")
-        tenant_id = fields.get("Tenant ID") or DEFAULT_TENANT_ID
-
-        # ----------------------------------------------------
-        # Log history entry
-        # ----------------------------------------------------
+        # Log history
         try:
             _log_history(
                 action=f"Verification - {status}",
-                store=store_name,
-                business_date=business_date,
-                fields_snapshot=updated.get("fields", {}),
+                store=fresh["fields"].get("Store Name"),
+                business_date=fresh["fields"].get("Date"),
+                fields_snapshot=fresh["fields"],
                 submitted_by=payload.verified_by,
                 record_id=record_id,
-                lock_status=updated.get("fields", {}).get("Lock Status"),
+                lock_status=fresh["fields"].get("Lock Status"),
                 changed_fields=list(update_fields.keys()),
-                tenant_id=tenant_id,
+                tenant_id=fresh["fields"].get("Tenant ID"),
             )
         except Exception as e:
-            print("⚠️ Failed to log verification history:", e)
+            print("⚠️ Verification history failed:", e)
 
-        # Success response
-        return {
-            "status": "ok",
-            "record_id": record_id,
-            "verified_status": status,
-        }
+        return fresh
 
-    except HTTPException:
-        raise
     except Exception as e:
-        print("❌ Error verifying record:", e)
-        raise HTTPException(status_code=500, detail=str(e))
-
+        print("❌ Verification error:", e)
+        raise
 
 # -----------------------------------------------------------
 # 📊 Management summary /reports/daily-summary
