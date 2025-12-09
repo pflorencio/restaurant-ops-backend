@@ -1381,6 +1381,207 @@ def verify_closing(payload: VerifyPayload):
         raise
 
 # -----------------------------------------------------------
+# 📊 Dashboard endpoint — single-day closing summary
+# -----------------------------------------------------------
+@app.get("/dashboard/closings")
+def dashboard_closing_summary(
+    business_date: str = Query(..., description="Business date YYYY-MM-DD"),
+    store_id: Optional[str] = Query(
+        None, description="Preferred: linked Store record ID"
+    ),
+    store_name: Optional[str] = Query(
+        None, description="Fallback: store name (e.g. \"Nonie's\")"
+    ),
+    store: Optional[str] = Query(
+        None,
+        description="Legacy alias for store_name; kept for backwards compatibility",
+    ),
+):
+    """
+    Dashboard-friendly endpoint that returns:
+    - The unique closing record for a given store + date
+    - Backend-computed summary metrics (variance, budgets, cash for deposit, transfer needed)
+
+    Priority:
+    1. Use store_id (linked Store record) if provided
+    2. Else, use store_name/store and Store Normalized
+    """
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+
+        # -----------------------------
+        # Helper: safe numeric extraction
+        # -----------------------------
+        def num(fields: Dict, key: str) -> float:
+            val = fields.get(key)
+            if isinstance(val, (int, float)):
+                return float(val)
+            try:
+                return float(val)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # -----------------------------
+        # 1) Preferred path: store_id + date
+        # -----------------------------
+        record = None
+
+        if store_id:
+            date_formula = (
+                "IS_SAME("
+                "{{Date}}, "
+                "DATETIME_PARSE('{bd}', 'YYYY-MM-DD'), "
+                "'day'"
+                ")"
+            ).format(bd=business_date)
+
+            candidates = table.all(formula=date_formula, max_records=50)
+
+            for r in candidates:
+                f = r.get("fields", {})
+                linked_ids = f.get("Store") or []
+                if isinstance(linked_ids, list) and store_id in linked_ids:
+                    record = r
+                    break
+
+        # -----------------------------
+        # 2) Fallback path: store_name/store + Store Normalized
+        # -----------------------------
+        if not record:
+            effective_store = store_name or store
+            if not effective_store and not store_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Either store_id or store_name/store is required.",
+                )
+
+            if effective_store:
+                normalized = normalize_store_value(effective_store)
+                formula = (
+                    "AND("
+                    "{{Store Normalized}}='{normalized}', "
+                    "IS_SAME("
+                    "{{Date}}, "
+                    "DATETIME_PARSE('{bd}', 'YYYY-MM-DD'), "
+                    "'day'"
+                    ")"
+                    ")"
+                ).format(normalized=normalized, bd=business_date)
+
+                records = table.all(formula=formula, max_records=1)
+                if records:
+                    record = records[0]
+
+        # -----------------------------
+        # No record found
+        # -----------------------------
+        if not record:
+            return {
+                "status": "empty",
+                "business_date": business_date,
+                "store": store_name or store,
+                "record_id": None,
+                "lock_status": "Unlocked",
+                "summary": None,
+                "raw_fields": {},
+            }
+
+        # -----------------------------
+        # Build summary from Airtable fields
+        # -----------------------------
+        fields = record.get("fields", {})
+        lock_status = fields.get("Lock Status", "Unlocked")
+
+        # Core numeric values
+        total_sales = num(fields, "Total Sales")
+        net_sales = num(fields, "Net Sales")
+
+        cash_payments = num(fields, "Cash Payments")
+        card_payments = num(fields, "Card Payments")
+        digital_payments = num(fields, "Digital Payments")
+        grab_payments = num(fields, "Grab Payments")
+        voucher_payments = num(fields, "Voucher Payments")
+        bank_transfer = num(fields, "Bank Transfer Payments")
+        marketing_expenses = num(fields, "Marketing Expenses")
+
+        kitchen_budget = num(fields, "Kitchen Budget")
+        bar_budget = num(fields, "Bar Budget")
+        non_food_budget = num(fields, "Non Food Budget")
+        staff_meal_budget = num(fields, "Staff Meal Budget")
+
+        actual_cash = num(fields, "Actual Cash Counted")
+        cash_float = num(fields, "Cash Float")
+
+        # Backend-computed totals (mirror frontend logic)
+        total_budgets = (
+            kitchen_budget
+            + bar_budget
+            + non_food_budget
+            + staff_meal_budget
+        )
+
+        # Variance: Actual Cash - Cash Payments - Float
+        variance = actual_cash - cash_payments - cash_float
+
+        # Cash for deposit & transfer needed:
+        # raw = Actual Cash - Float - Total Budgets
+        raw_cash_for_deposit = actual_cash - cash_float - total_budgets
+        cash_for_deposit = raw_cash_for_deposit if raw_cash_for_deposit > 0 else 0.0
+        transfer_needed = abs(raw_cash_for_deposit) if raw_cash_for_deposit < 0 else 0.0
+
+        summary = {
+            "total_sales": total_sales,
+            "net_sales": net_sales,
+            "cash_payments": cash_payments,
+            "card_payments": card_payments,
+            "digital_payments": digital_payments,
+            "grab_payments": grab_payments,
+            "voucher_payments": voucher_payments,
+            "bank_transfer_payments": bank_transfer,
+            "marketing_expenses": marketing_expenses,
+            "kitchen_budget": kitchen_budget,
+            "bar_budget": bar_budget,
+            "non_food_budget": non_food_budget,
+            "staff_meal_budget": staff_meal_budget,
+            "actual_cash_counted": actual_cash,
+            "cash_float": cash_float,
+            "total_budgets": total_budgets,
+            "variance": variance,
+            "cash_for_deposit": cash_for_deposit,
+            "transfer_needed": transfer_needed,
+        }
+
+        # Optional: include Airtable's formula fields for sanity-checking
+        airtable_formulas = {
+            "airtable_variance": fields.get("Variance"),
+            "airtable_total_budgets": fields.get("Total Budgets"),
+            "airtable_cash_for_deposit": fields.get("Cash for Deposit"),
+        }
+
+        store_display = (
+            fields.get("Store Name")
+            or fields.get("Store Display")
+            or fields.get("Store")
+        )
+
+        return {
+            "status": "found",
+            "business_date": business_date,
+            "store": store_display,
+            "record_id": record.get("id"),
+            "lock_status": lock_status,
+            "summary": summary,
+            "formulas": airtable_formulas,
+            "raw_fields": fields,
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Error in /dashboard/closings:", e)
+        raise HTTPException(status_code=500, detail=str(e))
+
+# -----------------------------------------------------------
 # 📊 Management summary /reports/daily-summary
 # -----------------------------------------------------------
 @app.get("/reports/daily-summary")
