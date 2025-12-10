@@ -1336,18 +1336,18 @@ async def verify_closing(payload: dict):
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
+    notes = payload.get("notes")  # NEW FIELD
 
     if not record_id or not status:
         raise HTTPException(status_code=400, detail="Missing record_id or status")
 
-    # Build Airtable update fields
     update_fields = {
         "Verified Status": status,
+        "Verification Notes": notes or "",
         "Last Updated At": datetime.utcnow().isoformat(),
         "Last Updated By": verified_by or "System"
     }
 
-    # --- Status Logic ---
     if status == "Verified":
         update_fields["Verification Time"] = datetime.utcnow().isoformat()
         update_fields["Lock Status"] = "Locked"
@@ -1360,14 +1360,18 @@ async def verify_closing(payload: dict):
         update_fields["Lock Status"] = "Unlocked"
         update_fields["Verification Time"] = None
 
-    # --- Push to Airtable ---
     try:
         AT.update_record("Daily Closing", record_id, update_fields)
     except Exception as e:
         print("Airtable update error:", e)
         raise HTTPException(status_code=500, detail="Failed to update verification status")
 
-    return {"status": "success", "record_id": record_id, "new_status": status}
+    return {
+        "status": "success",
+        "record_id": record_id,
+        "new_status": status,
+        "notes_saved": notes or ""
+    }
 
 # -----------------------------------------------------------
 # 📊 Dashboard endpoint — single-day closing summary
