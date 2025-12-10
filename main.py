@@ -1328,50 +1328,38 @@ def get_history(
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
-# ✅ Verification endpoint (manager review) — FIXED VERSION
+# ✅ Verification endpoint (manager review)
 # -----------------------------------------------------------
 @app.post("/verify")
 async def verify_closing(payload: dict):
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
-    notes = payload.get("notes")  # NEW FIELD
+    notes = payload.get("notes")
 
     if not record_id or not status:
         raise HTTPException(status_code=400, detail="Missing record_id or status")
 
-    # Base fields always updated
-    fields = {
+    # REQUIRED FIELDS (must match Airtable EXACTLY)
+    update_fields = {
         "Verified Status": status,
         "Verification Notes": notes or "",
-        "Verified By": verified_by or "",
         "Last Updated At": datetime.utcnow().isoformat(),
-        "Last Updated By": verified_by or "System",
+        "Last Updated By": verified_by or "System"
     }
 
-    # Status-specific rules
     if status == "Verified":
-        fields["Verification Time"] = datetime.utcnow().isoformat()
-        fields["Lock Status"] = "Locked"
+        update_fields["Verified At"] = datetime.utcnow().isoformat()
+        update_fields["Verified By"] = verified_by or "Manager"
+        update_fields["Lock Status"] = "Locked"
 
     elif status == "Needs Update":
-        fields["Lock Status"] = "Unlocked"
-        # Airtable CANNOT accept None → remove the field instead
-        # fields["Verification Time"] = None  
-
-    elif status == "Pending":
-        fields["Lock Status"] = "Unlocked"
-        # Same here
-        # fields["Verification Time"] = None
+        update_fields["Verified At"] = None
+        update_fields["Verified By"] = None
+        update_fields["Lock Status"] = "Unlocked"
 
     try:
-        # Airtable REQUIRES this structure:
-        AT.update_record(
-            "Daily Closing",
-            record_id,
-            {"fields": fields}   # ← THE FIX
-        )
-
+        AT.update_record("Daily Closing", record_id, update_fields)
     except Exception as e:
         print("Airtable update error:", e)
         raise HTTPException(status_code=500, detail="Failed to update verification status")
@@ -1380,8 +1368,7 @@ async def verify_closing(payload: dict):
         "status": "success",
         "record_id": record_id,
         "new_status": status,
-        "notes_saved": notes or "",
-        "verified_by": verified_by or ""
+        "notes_saved": notes or ""
     }
 
 # -----------------------------------------------------------
