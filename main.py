@@ -1332,53 +1332,42 @@ def get_history(
 # ✅ Verification endpoint (manager review)
 # -----------------------------------------------------------
 @app.post("/verify")
-def verify_closing(payload: VerifyPayload):
-    """
-    Mark a record as Verified or Flagged and log the action.
-    """
+async def verify_closing(payload: dict):
+    record_id = payload.get("record_id")
+    status = payload.get("status")
+    verified_by = payload.get("verified_by")
 
+    if not record_id or not status:
+        raise HTTPException(status_code=400, detail="Missing record_id or status")
+
+    # Build Airtable update fields
+    update_fields = {
+        "Verified Status": status,
+        "Last Updated At": datetime.utcnow().isoformat(),
+        "Last Updated By": verified_by or "System"
+    }
+
+    # --- Status Logic ---
+    if status == "Verified":
+        update_fields["Verification Time"] = datetime.utcnow().isoformat()
+        update_fields["Lock Status"] = "Locked"
+
+    elif status == "Needs Update":
+        update_fields["Lock Status"] = "Unlocked"
+        update_fields["Verification Time"] = None
+
+    elif status == "Pending":
+        update_fields["Lock Status"] = "Unlocked"
+        update_fields["Verification Time"] = None
+
+    # --- Push to Airtable ---
     try:
-        table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        record_id = payload.record_id
-
-        record = table.get(record_id)
-        if not record:
-            raise HTTPException(404, "Record not found")
-
-        status = payload.status.strip().capitalize()
-
-        update_fields = {
-            "Verified Status": status,
-            "Verified By": payload.verified_by,
-            "Verified At": datetime.now().isoformat(),
-        }
-
-        updated = table.update(record_id, update_fields)
-
-        # Refresh to capture Airtable formula fields
-        fresh = table.get(record_id)
-
-        # Log history
-        try:
-            _log_history(
-                action=f"Verification - {status}",
-                store=fresh["fields"].get("Store Name"),
-                business_date=fresh["fields"].get("Date"),
-                fields_snapshot=fresh["fields"],
-                submitted_by=payload.verified_by,
-                record_id=record_id,
-                lock_status=fresh["fields"].get("Lock Status"),
-                changed_fields=list(update_fields.keys()),
-                tenant_id=fresh["fields"].get("Tenant ID"),
-            )
-        except Exception as e:
-            print("⚠️ Verification history failed:", e)
-
-        return fresh
-
+        AT.update_record("Daily Closing", record_id, update_fields)
     except Exception as e:
-        print("❌ Verification error:", e)
-        raise
+        print("Airtable update error:", e)
+        raise HTTPException(status_code=500, detail="Failed to update verification status")
+
+    return {"status": "success", "record_id": record_id, "new_status": status}
 
 # -----------------------------------------------------------
 # 📊 Dashboard endpoint — single-day closing summary
