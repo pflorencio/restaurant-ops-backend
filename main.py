@@ -1295,7 +1295,7 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
 @app.get("/verification-queue")
 async def verification_queue():
     try:
-        all_records = DAILY_CLOSINGS.get_records()
+        all_records = DAILY_CLOSINGS.all()   # ✅ FIXED
     except Exception as e:
         print("Airtable error:", e)
         raise HTTPException(status_code=500, detail="Failed to fetch closings")
