@@ -1283,6 +1283,18 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
+# Get closings that need verification (Pending or Needs Update)
+# -----------------------------------------------------------
+@app.get("/closings/pending")
+async def get_pending_closings():
+    try:
+        results = AT.get_records("Daily Closing", filter_formula="OR({Verified Status}='Pending',{Verified Status}='Needs Update')")
+        return {"records": results}
+    except Exception as e:
+        print("Airtable fetch error:", e)
+        raise HTTPException(status_code=500, detail="Failed to load pending closings")
+
+# -----------------------------------------------------------
 # 📜 History read (admin view)
 # -----------------------------------------------------------
 @app.get("/history")
