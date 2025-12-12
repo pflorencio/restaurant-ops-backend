@@ -1290,25 +1290,20 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
-# Verification Queue — fetch all closings needing review
+# Verification Queue — FAST, Airtable-filtered version
 # -----------------------------------------------------------
 @app.get("/verification-queue")
 async def verification_queue():
     try:
-        all_records = DAILY_CLOSINGS.all()   # ✅ FIXED
+        # Airtable handles filtering internally
+        records = DAILY_CLOSINGS.all(
+            formula="OR({Verified Status}='Pending', {Verified Status}='Needs Update')"
+        )
+        return {"records": records}
+
     except Exception as e:
         print("Airtable error:", e)
         raise HTTPException(status_code=500, detail="Failed to fetch closings")
-
-    queue = []
-    for rec in all_records:
-        fields = rec.get("fields", {})
-        status = fields.get("Verified Status")
-
-        if status in ["Pending", "Needs Update"]:
-            queue.append(rec)
-
-    return {"records": queue}
 
 # -----------------------------------------------------------
 # 📜 History read (admin view)
