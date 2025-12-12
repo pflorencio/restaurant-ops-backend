@@ -41,6 +41,13 @@ AIRTABLE_USERS = Table(
     AIRTABLE_USERS_TABLE_ID
 )
 
+# 👉 Daily Closing table (main table for closings)
+DAILY_CLOSINGS = Table(
+    AIRTABLE_API_KEY,
+    AIRTABLE_BASE_ID,
+    AIRTABLE_DAILY_CLOSINGS_TABLE_ID
+)
+
 STORES_TABLE = "Stores"
 
 # Airtable formula fields (must never be updated via API)
@@ -1283,20 +1290,25 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         raise HTTPException(status_code=500, detail=str(e))
 
 # -----------------------------------------------------------
-# Get closings that need verification (Pending or Needs Update)
+# Verification Queue — fetch all closings needing review
 # -----------------------------------------------------------
-@app.get("/closings/pending")
-async def get_pending_closings():
+@app.get("/verification-queue")
+async def verification_queue():
     try:
-        results = AT.get_records(
-            "Daily Closing",
-            filter_formula="OR({Verified Status}='Pending',{Verified Status}='Needs Update')"
-        )
-        return {"records": results}
+        all_records = DAILY_CLOSINGS.get_records()
     except Exception as e:
-        print("Airtable fetch error:", e)
-        raise HTTPException(status_code=500, detail="Failed to load pending closings")
+        print("Airtable error:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch closings")
 
+    queue = []
+    for rec in all_records:
+        fields = rec.get("fields", {})
+        status = fields.get("Verified Status")
+
+        if status in ["Pending", "Needs Update"]:
+            queue.append(rec)
+
+    return {"records": queue}
 
 # -----------------------------------------------------------
 # 📜 History read (admin view)
