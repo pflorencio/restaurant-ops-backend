@@ -1,15 +1,16 @@
 import os
 from sendgrid import SendGridAPIClient
-from sendgrid.helpers.mail import Mail
+from sendgrid.helpers.mail import Mail, Email, To
 
 # -----------------------------------------------------------
 # 🔐 Environment Variables
 # -----------------------------------------------------------
 SENDGRID_API_KEY = os.getenv("SENDGRID_API_KEY")
 
-EMAIL_FROM = os.getenv("EMAIL_USER")  # sender email
+EMAIL_FROM = os.getenv("EMAIL_USER")  # verified sender email
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME", "Closing Report App")
 
+# For MVP: everything goes here
 TEST_EMAIL_RECIPIENT = os.getenv("TEST_EMAIL_RECIPIENT", EMAIL_FROM)
 
 
@@ -20,7 +21,7 @@ def send_closing_submission_email(
     reason: str,
 ):
     """
-    Sends email via SendGrid (non-blocking caller).
+    Sends email via SendGrid (non-blocking).
 
     reason:
     - first_submission
@@ -30,6 +31,9 @@ def send_closing_submission_email(
     try:
         if not SENDGRID_API_KEY:
             raise ValueError("SENDGRID_API_KEY not configured")
+
+        if not TEST_EMAIL_RECIPIENT:
+            raise ValueError("TEST_EMAIL_RECIPIENT not configured")
 
         # ---------------------------------------------------
         # Subject
@@ -43,8 +47,7 @@ def send_closing_submission_email(
         # ---------------------------------------------------
         # Email Body (plain text for MVP)
         # ---------------------------------------------------
-        body = f"""
-Closing Report Notification
+        body = f"""Closing Report Notification
 
 Store: {store_name}
 Business Date: {business_date}
@@ -57,11 +60,14 @@ This is an automated message.
 """
 
         # ---------------------------------------------------
-        # Build SendGrid Mail
+        # Build SendGrid Mail (explicit objects)
         # ---------------------------------------------------
+        from_email = Email(EMAIL_FROM, EMAIL_FROM_NAME)
+        to_email = To(TEST_EMAIL_RECIPIENT)
+
         message = Mail(
-            from_email=(EMAIL_FROM, EMAIL_FROM_NAME),
-            to_emails=TEST_EMAIL_RECIPIENT,
+            from_email=from_email,
+            to_emails=to_email,
             subject=subject,
             plain_text_content=body,
         )
@@ -70,7 +76,8 @@ This is an automated message.
         response = sg.send(message)
 
         print(
-            f"📧 Email sent via SendGrid | status={response.status_code} | reason={reason}"
+            f"📧 Email sent via SendGrid | status={response.status_code} | "
+            f"to={TEST_EMAIL_RECIPIENT} | reason={reason}"
         )
 
     except Exception as e:
