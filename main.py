@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, RootModel
 from dotenv import load_dotenv
 from pyairtable import Table
+from email import send_closing_submission_email
 
 # -----------------------------------------------------------
 # 🔧 Load environment
@@ -673,7 +674,6 @@ def upsert_closing(payload: ClosingCreate):
             "Staff Meal Budget": payload.staff_meal_budget,
         }
 
-        # Reject NaN, Infinity, negative numbers
         for field_name, value in numeric_fields.items():
             if value is not None:
                 if isinstance(value, float) and (math.isnan(value) or math.isinf(value)):
@@ -681,14 +681,12 @@ def upsert_closing(payload: ClosingCreate):
                 if value < 0:
                     raise HTTPException(400, f"{field_name} cannot be negative.")
 
-        # 1️⃣ Net Sales ≤ Total Sales
         if payload.total_sales is not None and payload.net_sales is not None:
             if payload.net_sales > payload.total_sales:
                 raise HTTPException(
                     400, "Net sales cannot exceed total sales."
                 )
 
-        # 2️⃣ Payments must reconcile
         payments_sum = (
             (payload.cash_payments or 0)
             + (payload.card_payments or 0)
@@ -706,7 +704,6 @@ def upsert_closing(payload: ClosingCreate):
                     f"Sum of payments ({payments_sum}) must equal Total Sales ({payload.total_sales}).",
                 )
 
-        # 4️⃣ Total Budgets ≤ Net Sales
         budget_total = (
             (payload.kitchen_budget or 0)
             + (payload.bar_budget or 0)
@@ -744,6 +741,17 @@ def upsert_closing(payload: ClosingCreate):
                 existing = rec
                 break
 
+        # ===========================================================
+        # 📧 EMAIL TRIGGER LOGIC (SAFE — READ ONLY)
+        # ===========================================================
+        previous_status = None
+        is_first_submission = False
+
+        if not existing:
+            is_first_submission = True
+        else:
+            previous_status = existing.get("fields", {}).get("Verified Status")
+
         # -----------------------------------------
         # PREPARE PAYLOAD FOR AIRTABLE
         # -----------------------------------------
@@ -770,17 +778,14 @@ def upsert_closing(payload: ClosingCreate):
             "Staff Meal Budget": payload.staff_meal_budget,
         }
 
-        # Linked store
         if store_id:
             fields["Store"] = [store_id]
         else:
             fields["Store"] = store_name
 
-        # Remove formula fields (these MUST NOT be sent)
         for f in ["Variance", "Cash for Deposit", "Total Budgets"]:
             fields.pop(f, None)
 
-        # Convert datetimes safely
         fields = json.loads(json.dumps(fields, default=str))
 
         # ===========================================================
@@ -791,13 +796,13 @@ def upsert_closing(payload: ClosingCreate):
             lock_status = existing["fields"].get("Lock Status", "Unlocked")
 
             if lock_status in ["Locked", "Verified"]:
-                raise HTTPException(403, f"Record for {store_name} on {business_date} is locked.")
+                raise HTTPException(
+                    403, f"Record for {store_name} on {business_date} is locked."
+                )
 
             fields["Lock Status"] = "Locked"
 
-            updated = table.update(rec_id, fields)
-
-            # Fetch fresh copy including formula fields
+            table.update(rec_id, fields)
             fresh = table.get(rec_id)
 
             _log_history(
@@ -812,6 +817,15 @@ def upsert_closing(payload: ClosingCreate):
                 tenant_id=tenant_id,
             )
 
+            # 📧 Email only if resubmitting after Needs Update
+            if previous_status == "Needs Update":
+                send_closing_submission_email(
+                    store_name=store_name,
+                    business_date=business_date,
+                    submitted_by=payload.submitted_by,
+                    reason="resubmission_after_update",
+                )
+
             return {
                 "status": "updated_locked",
                 "id": rec_id,
@@ -824,8 +838,6 @@ def upsert_closing(payload: ClosingCreate):
         # ===========================================================
         fields["Lock Status"] = "Locked"
         created = table.create(fields)
-
-        # Fetch fresh copy including formulas
         fresh = table.get(created["id"])
 
         _log_history(
@@ -838,6 +850,14 @@ def upsert_closing(payload: ClosingCreate):
             lock_status=fresh["fields"].get("Lock Status"),
             changed_fields=list(fields.keys()),
             tenant_id=tenant_id,
+        )
+
+        # 📧 Email on first submission
+        send_closing_submission_email(
+            store_name=store_name,
+            business_date=business_date,
+            submitted_by=payload.submitted_by,
+            reason="first_submission",
         )
 
         return {
