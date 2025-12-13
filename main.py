@@ -647,9 +647,7 @@ def upsert_closing(payload: ClosingCreate):
                 print("⚠️ Could not resolve linked store name:", e)
 
         if not store_id and not store_name:
-            raise HTTPException(
-                400, "Either store_id or store name is required."
-            )
+            raise HTTPException(400, "Either store_id or store name is required.")
 
         # -----------------------------------------
         # VALIDATION RULES
@@ -683,9 +681,7 @@ def upsert_closing(payload: ClosingCreate):
 
         if payload.total_sales is not None and payload.net_sales is not None:
             if payload.net_sales > payload.total_sales:
-                raise HTTPException(
-                    400, "Net sales cannot exceed total sales."
-                )
+                raise HTTPException(400, "Net sales cannot exceed total sales.")
 
         payments_sum = (
             (payload.cash_payments or 0)
@@ -730,8 +726,8 @@ def upsert_closing(payload: ClosingCreate):
 
         for rec in candidates:
             fields = rec.get("fields", {})
-
             linked_ids = fields.get("Store") or []
+
             if store_id and isinstance(linked_ids, list) and store_id in linked_ids:
                 existing = rec
                 break
@@ -741,16 +737,18 @@ def upsert_closing(payload: ClosingCreate):
                 existing = rec
                 break
 
-        # ===========================================================
-        # 📧 EMAIL TRIGGER LOGIC (SAFE — READ ONLY)
-        # ===========================================================
-        previous_status = None
-        is_first_submission = False
-
+        # -----------------------------------------
+        # 📧 Determine email reason (SAFE & EXPLICIT)
+        # -----------------------------------------
         if not existing:
-            is_first_submission = True
+            email_reason = "first_submission"
         else:
-            previous_status = existing.get("fields", {}).get("Verified Status")
+            prev_status = existing.get("fields", {}).get("Verified Status")
+            email_reason = (
+                "resubmission_after_update"
+                if prev_status == "Needs Update"
+                else None
+            )
 
         # -----------------------------------------
         # PREPARE PAYLOAD FOR AIRTABLE
@@ -801,7 +799,6 @@ def upsert_closing(payload: ClosingCreate):
                 )
 
             fields["Lock Status"] = "Locked"
-
             table.update(rec_id, fields)
             fresh = table.get(rec_id)
 
@@ -817,13 +814,13 @@ def upsert_closing(payload: ClosingCreate):
                 tenant_id=tenant_id,
             )
 
-            # 📧 Email only if resubmitting after Needs Update
-            if previous_status == "Needs Update":
+            # 📧 Email ONLY if resubmission after Needs Update
+            if email_reason == "resubmission_after_update":
                 send_closing_submission_email(
                     store_name=store_name,
                     business_date=business_date,
                     submitted_by=payload.submitted_by,
-                    reason=reason,
+                    reason=email_reason,
                     closing_fields=fresh.get("fields", {}),
                 )
 
@@ -858,7 +855,7 @@ def upsert_closing(payload: ClosingCreate):
             store_name=store_name,
             business_date=business_date,
             submitted_by=payload.submitted_by,
-            reason=reason,
+            reason="first_submission",
             closing_fields=fresh.get("fields", {}),
         )
 
