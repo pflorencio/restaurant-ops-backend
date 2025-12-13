@@ -1,14 +1,22 @@
 import os
 import smtplib
+import socket
 from email.message import EmailMessage
 
+# -----------------------------------------------------------
+# 📧 Email Configuration (from Render env vars)
+# -----------------------------------------------------------
 EMAIL_HOST = os.getenv("EMAIL_HOST")
 EMAIL_PORT = int(os.getenv("EMAIL_PORT", "587"))
 EMAIL_USER = os.getenv("EMAIL_USER")
 EMAIL_PASSWORD = os.getenv("EMAIL_PASSWORD")
 EMAIL_FROM_NAME = os.getenv("EMAIL_FROM_NAME")
 
+# For MVP: send everything to one test inbox
 TEST_EMAIL_RECIPIENT = os.getenv("TEST_EMAIL_RECIPIENT", EMAIL_USER)
+
+# ⏱️ Global socket timeout (prevents hanging requests)
+socket.setdefaulttimeout(5)
 
 
 def send_closing_submission_email(
@@ -18,18 +26,31 @@ def send_closing_submission_email(
     reason: str,
 ):
     """
+    Sends a notification email when a closing is submitted.
+
     reason:
-    - first_submission
-    - resubmission_after_update
+    - "first_submission"
+    - "resubmission_after_update"
+
+    IMPORTANT:
+    - This function is NON-BLOCKING for the API
+    - Any failure here must NOT break the save flow
     """
 
-    subject_prefix = "🧾 Closing Submitted"
-    if reason == "resubmission_after_update":
-        subject_prefix = "🔄 Closing Re-Submitted"
+    try:
+        # ---------------------------------------------------
+        # Subject
+        # ---------------------------------------------------
+        subject_prefix = "🧾 Closing Submitted"
+        if reason == "resubmission_after_update":
+            subject_prefix = "🔄 Closing Re-Submitted"
 
-    subject = f"{subject_prefix} — {store_name} ({business_date})"
+        subject = f"{subject_prefix} — {store_name} ({business_date})"
 
-    body = f"""
+        # ---------------------------------------------------
+        # Body
+        # ---------------------------------------------------
+        body = f"""
 Closing Report Notification
 
 Store: {store_name}
@@ -42,13 +63,27 @@ Submission Type:
 This is an automated message.
 """
 
-    msg = EmailMessage()
-    msg["From"] = f"{EMAIL_FROM_NAME} <{EMAIL_USER}>"
-    msg["To"] = TEST_EMAIL_RECIPIENT
-    msg["Subject"] = subject
-    msg.set_content(body)
+        # ---------------------------------------------------
+        # Email Message
+        # ---------------------------------------------------
+        msg = EmailMessage()
+        msg["From"] = f"{EMAIL_FROM_NAME} <{EMAIL_USER}>"
+        msg["To"] = TEST_EMAIL_RECIPIENT
+        msg["Subject"] = subject
+        msg.set_content(body)
 
-    with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT) as server:
-        server.starttls()
-        server.login(EMAIL_USER, EMAIL_PASSWORD)
-        server.send_message(msg)
+        # ---------------------------------------------------
+        # SMTP Send (with timeout)
+        # ---------------------------------------------------
+        with smtplib.SMTP(EMAIL_HOST, EMAIL_PORT, timeout=5) as server:
+            server.starttls()
+            server.login(EMAIL_USER, EMAIL_PASSWORD)
+            server.send_message(msg)
+
+        print(
+            f"📧 Email sent | {store_name} | {business_date} | {reason}"
+        )
+
+    except Exception as e:
+        # 🚨 CRITICAL: Never block or fail the request
+        print("⚠️ Email send failed (non-blocking):", e)
