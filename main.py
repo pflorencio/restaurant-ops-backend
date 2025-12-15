@@ -26,41 +26,11 @@ load_dotenv()
 # -----------------------------------------------------------
 AIRTABLE_BASE_ID = os.getenv("AIRTABLE_BASE_ID")
 AIRTABLE_API_KEY = os.getenv("AIRTABLE_API_KEY")
-AIRTABLE_TABLE_NAME = os.getenv("AIRTABLE_TABLE_NAME")
-AIRTABLE_DAILY_CLOSINGS_TABLE = os.getenv("AIRTABLE_DAILY_CLOSINGS_TABLE")
-AIRTABLE_DAILY_CLOSINGS_TABLE_ID = os.getenv(
-    "AIRTABLE_DAILY_CLOSINGS_TABLE_ID")
-AIRTABLE_HISTORY_TABLE = os.getenv("AIRTABLE_HISTORY_TABLE")
-AIRTABLE_HISTORY_TABLE_ID = os.getenv("AIRTABLE_HISTORY_TABLE_ID")
 
 if not AIRTABLE_BASE_ID or not AIRTABLE_API_KEY:
-    raise Exception(
-        "❌ Missing Airtable credentials — check Render Environment settings.")
-
-# 👉 NEW: Users table (by name, that's fine here)
-AIRTABLE_USERS_TABLE_ID = os.getenv("AIRTABLE_USERS_TABLE_ID")
-
-AIRTABLE_USERS = Table(
-    AIRTABLE_API_KEY,
-    AIRTABLE_BASE_ID,
-    AIRTABLE_USERS_TABLE_ID
-)
-
-# 👉 Daily Closing table (main table for closings)
-DAILY_CLOSINGS = Table(
-    AIRTABLE_API_KEY,
-    AIRTABLE_BASE_ID,
-    AIRTABLE_DAILY_CLOSINGS_TABLE_ID
-)
-
-STORES_TABLE = "Stores"
-
-# Airtable formula fields (must never be updated via API)
-FORMULA_FIELDS = [
-    "Total Budgets",
-    "Variance",
-    "Cash for Deposit",
-]
+    raise RuntimeError(
+        "❌ Missing Airtable credentials — check Render Environment settings."
+    )
 
 # -----------------------------------------------------------
 # 🚀 FastAPI App Init
@@ -84,27 +54,25 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-
-# Generic OPTIONS for preflight (kept, but GET routes override for normal traffic)
+# Generic OPTIONS for preflight
 @app.options("/{rest_of_path:path}")
 async def options_handler(request: Request, rest_of_path: str):
     response = JSONResponse({"ok": True})
     response.headers["Access-Control-Allow-Origin"] = FRONTEND_URL
-    response.headers[
-        "Access-Control-Allow-Methods"] = "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    response.headers["Access-Control-Allow-Methods"] = (
+        "GET, POST, PUT, PATCH, DELETE, OPTIONS"
+    )
     response.headers["Access-Control-Allow-Headers"] = "*"
     return response
 
 # -----------------------------------------------------------
 # 🔗 Airtable Helpers (STRICT mode using IDs)
 # -----------------------------------------------------------
-
 def _airtable_table(table_key: str) -> Table:
-    base_id = os.getenv("AIRTABLE_BASE_ID")
-    api_key = os.getenv("AIRTABLE_API_KEY")
-
-    if not base_id or not api_key:
-        raise RuntimeError("Missing AIRTABLE_BASE_ID or AIRTABLE_API_KEY")
+    """
+    Centralized Airtable table resolver.
+    Uses table IDs only (safe for production).
+    """
 
     table_configs = {
         "daily_closing": {
@@ -132,60 +100,80 @@ def _airtable_table(table_key: str) -> Table:
     table_id = os.getenv(cfg["id_env"])
 
     if not table_id:
-        raise RuntimeError(f"Missing table ID for {table_key} → {cfg['id_env']}")
+        raise RuntimeError(
+            f"Missing table ID for {table_key} → {cfg['id_env']}"
+        )
 
-    return Table(api_key, base_id, table_id)
-
+    return Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, table_id)
 
 # -----------------------------------------------------------
-# TABLE KEYS
+# TABLE KEYS (single source of truth)
 # -----------------------------------------------------------
 DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
 STORES_TABLE = "stores"
 USERS_TABLE = "users"
 
+# -----------------------------------------------------------
+# 🧠 Tenant Helpers
+# -----------------------------------------------------------
 DEFAULT_TENANT_ID = os.getenv("DEFAULT_TENANT_ID", "demo-tenant")
-
 
 def resolve_tenant_id(explicit: Optional[str]) -> str:
     return explicit or DEFAULT_TENANT_ID
 
-
 def normalize_store_value(store: Optional[str]) -> str:
-    return ((store or "")
-            .lower()
-            .strip()
-            .replace("’", "")
-            .replace("‘", "")
-            .replace("'", ""))
-
-
-# -----------------------------------------------------------
-# USERS TABLE OBJECT
-# -----------------------------------------------------------
-AIRTABLE_USERS_TABLE_ID = os.getenv("AIRTABLE_USERS_TABLE_ID")
-if not AIRTABLE_USERS_TABLE_ID:
-    raise RuntimeError("Missing AIRTABLE_USERS_TABLE_ID")
-
-AIRTABLE_USERS = Table(
-    os.getenv("AIRTABLE_API_KEY"),
-    os.getenv("AIRTABLE_BASE_ID"),
-    AIRTABLE_USERS_TABLE_ID
-)
+    return (
+        (store or "")
+        .lower()
+        .strip()
+        .replace("’", "")
+        .replace("‘", "")
+        .replace("'", "")
+    )
 
 # -----------------------------------------------------------
-# STORES TABLE OBJECT
+# 🧠 Shared User Validation Logic
 # -----------------------------------------------------------
-AIRTABLE_STORES_TABLE_ID = os.getenv("AIRTABLE_STORES_TABLE_ID")
-if not AIRTABLE_STORES_TABLE_ID:
-    raise RuntimeError("Missing AIRTABLE_STORES_TABLE_ID")
+def validate_user_payload(
+    *,
+    role: str,
+    store: Optional[str],
+    store_access: Optional[List[str]],
+):
+    """
+    Centralized validation rules for Users & Access.
 
-AIRTABLE_STORES = Table(
-    os.getenv("AIRTABLE_API_KEY"),
-    os.getenv("AIRTABLE_BASE_ID"),
-    AIRTABLE_STORES_TABLE_ID
-)
+    Rules:
+    - cashier → exactly ONE store
+    - manager → at least ONE store
+    - admin → store optional
+    """
+
+    role = (role or "").lower()
+    store_access = store_access or []
+
+    if role == "admin":
+        return
+
+    if role == "cashier":
+        if store_access and len(store_access) != 1:
+            raise HTTPException(
+                status_code=400,
+                detail="Cashiers must be assigned to exactly one store.",
+            )
+        if not store and not store_access:
+            raise HTTPException(
+                status_code=400,
+                detail="Cashiers must be assigned to one store.",
+            )
+
+    if role == "manager":
+        if not store and not store_access:
+            raise HTTPException(
+                status_code=400,
+                detail="Managers must be assigned to at least one store.",
+            )
 
 # -----------------------------------------------------------
 # 🧩 Models
@@ -239,6 +227,34 @@ class ClosingUpdate(RootModel[Dict]):
     """
     pass
 
+# -----------------------------------------------------------
+# 👤 User Create Payload
+# -----------------------------------------------------------
+class UserCreate(BaseModel):
+    name: str
+    pin: str
+    role: str  # cashier | manager | admin
+
+    # Linked Airtable IDs
+    store: Optional[str] = None              # single store (cashier shortcut)
+    store_access: Optional[List[str]] = None # multi-store (manager/admin)
+
+    email: Optional[str] = None
+    active: Optional[bool] = True
+
+# -----------------------------------------------------------
+# 👤 User Update Payload
+# -----------------------------------------------------------
+class UserUpdate(BaseModel):
+    name: Optional[str] = None
+    pin: Optional[str] = None
+    role: Optional[str] = None
+
+    store: Optional[str] = None
+    store_access: Optional[List[str]] = None
+
+    email: Optional[str] = None
+    active: Optional[bool] = None
 
 # -----------------------------------------------------------
 # 🔍 Basic routes
@@ -273,7 +289,6 @@ def airtable_test():
         return {"records": [r.get("fields", {}) for r in records]}
     except Exception as e:
         return {"error": str(e)}
-
 
 # ---------------------------------------------------------
 # GET /stores  →  List all active stores
@@ -457,90 +472,300 @@ def user_login(payload: UserLoginRequest):
         print("❌ Error in /auth/user-login:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
-# ------------------------------------------------------------
-# ⭐ ADMIN USER MANAGEMENT (Update Role, Active, Store, Access)
-# ------------------------------------------------------------
+# -----------------------------------------------------------
+# 👤 ADMIN — UPDATE USER
+# -----------------------------------------------------------
 @app.patch("/admin/users/{user_id}")
-async def update_user(user_id: str, payload: dict):
+def update_user(user_id: str, payload: UserUpdate):
     """
-    Admin update endpoint:
-    Allows editing:
-    - Role
-    - Active (true/false)
-    - Store (linked single record)
-    - Store Access (multi-linked)
+    Update an existing user with role-based access rules.
     """
-
-    update_fields: Dict[str, object] = {}
-
-    # Role change
-    if "role" in payload:
-        update_fields["Role"] = payload["role"]
-
-    # Activate / deactivate user
-    if "active" in payload:
-        update_fields["Active"] = bool(payload["active"])
-
-    # Change primary store (linked field is "Stores")
-    if "store_id" in payload:
-        update_fields["Stores"] = ([payload["store_id"]]
-                                   if payload["store_id"] else [])
-
-    # Update store access (multi-linked "Store Access")
-    if "store_access_ids" in payload:
-        update_fields["Store Access"] = payload["store_access_ids"] or []
 
     try:
-        updated = AIRTABLE_USERS.update(user_id, update_fields)
-        return {"status": "ok", "fields": updated.get("fields", {})}
-    except Exception as e:
-        print("❌ Error updating user:", e)
-        raise HTTPException(status_code=500, detail="Failed to update user")
+        table = _airtable_table("users")
 
+        # ---------------------------------------------------
+        # Fetch existing record
+        # ---------------------------------------------------
+        existing = table.get(user_id)
+        if not existing:
+            raise HTTPException(status_code=404, detail="User not found")
 
-# ---------------------------------------------------------
-# POST /admin/users  →  Create a new user
-# ---------------------------------------------------------
-@app.post("/admin/users")
-async def create_user(payload: dict):
-    """
-    Expected payload example:
-    {
-        "name": "New Cashier",
-        "pin": "1504",
-        "role": "cashier",
-        "active": true,
-        "store_id": "recXXXX",           # optional
-        "store_access_ids": ["recYYY"]   # optional array
-    }
-    """
-    try:
-        fields = {
-            "Name": payload.get("name"),
-            "PIN": payload.get("pin"),
-            "Role": payload.get("role", "cashier"),
-            "Active": payload.get("active", True),
+        current_fields = existing.get("fields", {})
+
+        # ---------------------------------------------------
+        # Resolve final values (merge existing + payload)
+        # ---------------------------------------------------
+        role = payload.role or current_fields.get("Role")
+
+        store = payload.store
+        store_access = payload.store_access
+
+        # If not explicitly provided, retain current values
+        if store is None:
+            existing_store = current_fields.get("Store")
+            store = existing_store[0] if isinstance(existing_store, list) and existing_store else None
+
+        if store_access is None:
+            store_access = current_fields.get("Store Access")
+
+        # ---------------------------------------------------
+        # Validate role + store rules
+        # ---------------------------------------------------
+        validate_user_payload(
+            role=role,
+            store=store,
+            store_access=store_access,
+        )
+
+        now_iso = datetime.utcnow().isoformat()
+
+        update_fields = {
+            "Updated At": now_iso,
         }
 
-        # Assigned Store (single linked field "Stores")
-        if payload.get("store_id"):
-            fields["Stores"] = [payload["store_id"]]
+        # ---------------------------------------------------
+        # Apply updates if present
+        # ---------------------------------------------------
+        if payload.name is not None:
+            update_fields["Name"] = payload.name
 
-        # Store Access (multi linked "Store Access")
-        if payload.get("store_access_ids"):
-            fields["Store Access"] = payload["store_access_ids"]
+        if payload.pin is not None:
+            update_fields["Pin"] = payload.pin
 
-        created = AIRTABLE_USERS.create(fields)
+        if payload.role is not None:
+            update_fields["Role"] = payload.role
+
+        if payload.email is not None:
+            update_fields["Email"] = payload.email
+
+        if payload.active is not None:
+            update_fields["Active"] = payload.active
+
+        # ---------------------------------------------------
+        # Store logic by role
+        # ---------------------------------------------------
+        if role == "cashier":
+            # Cashier → exactly one store
+            store_id = store or (
+                store_access[0] if store_access else None
+            )
+
+            if not store_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cashiers must be assigned to one store.",
+                )
+
+            update_fields["Store"] = [store_id]
+            update_fields["Store Access"] = [store_id]
+
+        elif role == "manager":
+            if store_access:
+                update_fields["Store Access"] = store_access
+            elif store:
+                update_fields["Store Access"] = [store]
+
+            update_fields.pop("Store", None)
+
+        elif role == "admin":
+            # Admins don't need stores
+            update_fields.pop("Store", None)
+            update_fields.pop("Store Access", None)
+
+        # ---------------------------------------------------
+        # Update Airtable
+        # ---------------------------------------------------
+        updated = table.update(user_id, update_fields)
 
         return {
-            "status": "success",
-            "id": created.get("id"),
-            "fields": created.get("fields"),
+            "status": "updated",
+            "user_id": user_id,
+            "fields": updated.get("fields", {}),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
-        print("❌ Error creating user:", e)
-        raise HTTPException(status_code=500, detail=str(e))
+        print("❌ Update user error:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to update user",
+        )
+
+# -----------------------------------------------------------
+# 👤 ADMIN — CREATE USER
+# -----------------------------------------------------------
+@app.post("/admin/users")
+def create_user(payload: UserCreate):
+    """
+    Create a new user with role-based access rules.
+    """
+
+    try:
+        # ---------------------------------------------------
+        # Validate role + store rules (shared logic)
+        # ---------------------------------------------------
+        validate_user_payload(
+            role=payload.role,
+            store=payload.store,
+            store_access=payload.store_access,
+        )
+
+        table = _airtable_table("users")
+
+        now_iso = datetime.utcnow().isoformat()
+
+        fields = {
+            "Name": payload.name,
+            "Pin": payload.pin,
+            "Role": payload.role,
+            "Active": payload.active if payload.active is not None else True,
+            "Created At": now_iso,
+            "Updated At": now_iso,
+        }
+
+        # Optional email
+        if payload.email:
+            fields["Email"] = payload.email
+
+        # -----------------------------------------
+        # Store assignment logic
+        # -----------------------------------------
+        if payload.role == "cashier":
+            # Cashier → exactly one store
+            store_id = payload.store or (
+                payload.store_access[0] if payload.store_access else None
+            )
+
+            if not store_id:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cashiers must be assigned to one store.",
+                )
+
+            fields["Store"] = [store_id]
+            fields["Store Access"] = [store_id]
+
+        elif payload.role == "manager":
+            if payload.store_access:
+                fields["Store Access"] = payload.store_access
+            elif payload.store:
+                fields["Store Access"] = [payload.store]
+
+        # Admin → no store required
+
+        # -----------------------------------------
+        # Create record in Airtable
+        # -----------------------------------------
+        created = table.create(fields)
+
+        return {
+            "status": "created",
+            "user_id": created.get("id"),
+            "fields": created.get("fields", {}),
+        }
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        print("❌ Create user error:", e)
+        raise HTTPException(
+            status_code=500,
+            detail="Failed to create user",
+        )
+
+# ---------------------------------------------------------
+# GET /admin/roles-metadata  →  Role rules + helper text
+# ---------------------------------------------------------
+@app.get("/admin/roles-metadata")
+async def get_roles_metadata():
+    """
+    Frontend helper endpoint so UI can enforce rules consistently.
+    """
+    return {
+        "roles": [
+            {
+                "key": "cashier",
+                "label": "Cashier",
+                "helper": "Cashiers can only access one store and submit closings.",
+                "requires_store": True,
+                "max_stores": 1,
+            },
+            {
+                "key": "manager",
+                "label": "Manager",
+                "helper": "Managers can verify closings and access assigned stores.",
+                "requires_store": True,
+                "max_stores": None,  # can have multiple via Store Access
+            },
+            {
+                "key": "admin",
+                "label": "Admin",
+                "helper": "Admins have full access across all stores and settings.",
+                "requires_store": False,
+                "max_stores": None,
+            },
+        ]
+    }
+
+
+# ---------------------------------------------------------
+# GET /admin/users  →  List users for Users & Access table
+# ---------------------------------------------------------
+@app.get("/admin/users")
+async def admin_list_users():
+    """
+    Returns all users in Airtable with normalized fields for the frontend table.
+    """
+    try:
+        records = AIRTABLE_USERS.all()
+
+        users = []
+        for r in records:
+            f = r.get("fields", {}) or {}
+
+            # Build Store Access list
+            access_ids = f.get("Store Access") or []
+            access_names = f.get("Store (from Store Access)") or []
+            store_access_list = []
+            for i, sid in enumerate(access_ids):
+                store_access_list.append({
+                    "id": sid,
+                    "name": access_names[i] if i < len(access_names) else ""
+                })
+
+            # Primary store (your existing convention uses "Stores")
+            store_obj = None
+            if isinstance(f.get("Stores"), list) and f.get("Stores"):
+                store_obj = {
+                    "id": f["Stores"][0],
+                    "name": (f.get("Store (from Stores)") or f.get("Store (from store)") or "")
+                }
+
+            # Fallback: if no primary store set, use first store access
+            if not store_obj and store_access_list:
+                store_obj = store_access_list[0]
+
+            users.append({
+                "record_id": r.get("id"),
+                "user_id": f.get("User ID"),  # autonumber (may be None if not present)
+                "name": f.get("Name"),
+                "pin": f.get("PIN") or f.get("Pin"),
+                "role": str(f.get("Role", "cashier")).lower(),
+                "active": bool(f.get("Active", True)),
+                "email": f.get("Email"),
+                "store": store_obj,
+                "store_access": store_access_list,
+                "created_at": f.get("Created At"),
+                "updated_at": f.get("Updated At"),
+            })
+
+        return users
+
+    except Exception as e:
+        print("❌ Error in GET /admin/users:", e)
+        raise HTTPException(status_code=500, detail="Failed to fetch users")
 
 # -----------------------------------------------------------
 # 📝 History logger
