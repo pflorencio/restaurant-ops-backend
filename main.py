@@ -100,11 +100,10 @@ def _airtable_table(table_key: str) -> Table:
     table_id = os.getenv(cfg["id_env"])
 
     if not table_id:
-        raise RuntimeError(
-            f"Missing table ID for {table_key} → {cfg['id_env']}"
-        )
+        raise RuntimeError(f"Missing table ID for {table_key} → {cfg['id_env']}")
 
     return Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, table_id)
+
 
 # -----------------------------------------------------------
 # TABLE KEYS (single source of truth)
@@ -113,6 +112,12 @@ DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
 STORES_TABLE = "stores"
 USERS_TABLE = "users"
+
+
+# -----------------------------------------------------------
+# 🧩 Backward-compat Airtable Table Aliases (for older routes)
+# -----------------------------------------------------------
+DAILY_CLOSINGS = _airtable_table(DAILY_CLOSINGS_TABLE)
 
 # -----------------------------------------------------------
 # 🧠 Tenant Helpers
