@@ -144,7 +144,7 @@ This is an automated message.
 
 
 # -----------------------------------------------------------
-# ✅ VERIFICATION SUMMARY EMAIL (NEW)
+# ✅ VERIFICATION SUMMARY EMAIL
 # -----------------------------------------------------------
 def send_closing_verification_email(
     store_name: str,
@@ -187,6 +187,9 @@ def send_closing_verification_email(
         cash_for_deposit = f.get("Cash for Deposit")
         bank_transfer = f.get("Bank Transfer Payments")
 
+        # ---------------------------------------------------
+        # Email Body
+        # ---------------------------------------------------
         body = f"""
 CLOSING VERIFIED ✅
 

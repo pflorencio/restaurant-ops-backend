@@ -10,7 +10,11 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, RootModel
 from dotenv import load_dotenv
 from pyairtable import Table
-from email_service import send_closing_submission_email
+
+from email_service import (
+    send_closing_submission_email,
+    send_closing_verification_email,
+)
 
 # -----------------------------------------------------------
 # 🔧 Load environment
