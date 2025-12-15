@@ -1384,6 +1384,7 @@ async def verify_closing(payload: dict):
       "notes": "Some notes here"
     }
     """
+
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
@@ -1394,7 +1395,9 @@ async def verify_closing(payload: dict):
 
     now_iso = datetime.utcnow().isoformat()
 
+    # -------------------------------------------------------
     # Base fields that always update
+    # -------------------------------------------------------
     update_fields = {
         "Verified Status": status,
         "Verification Notes": notes or "",
@@ -1403,22 +1406,53 @@ async def verify_closing(payload: dict):
         "Last Updated By": verified_by or "System",
     }
 
+    # -------------------------------------------------------
     # Locking behaviour
+    # -------------------------------------------------------
     if status == "Verified":
-        # Lock the record + stamp verification time
         update_fields["Verified At"] = now_iso
         update_fields["Lock Status"] = "Locked"
     else:
-        # "Needs Update" or "Pending" → unlocked for cashier edits
         update_fields["Verified At"] = None
         update_fields["Lock Status"] = "Unlocked"
 
     try:
-        # Use the existing Airtable helper for the Daily Closing table
+        # ---------------------------------------------------
+        # Update Airtable record
+        # ---------------------------------------------------
         table = _airtable_table("daily_closing")
         table.update(record_id, update_fields)
+
+        # ---------------------------------------------------
+        # 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
+        # ---------------------------------------------------
+        if status == "Verified":
+            # Fetch fresh copy including formulas
+            fresh = table.get(record_id)
+            fields = fresh.get("fields", {})
+
+            # Resolve store name safely
+            store_name = (
+                fields.get("Store Name")
+                or fields.get("Store Normalized")
+                or "Unknown Store"
+            )
+
+            business_date = fields.get("Date")
+            cashier_name = fields.get("Submitted By")
+
+            # Send verification summary email (non-blocking)
+            send_closing_verification_email(
+                store_name=store_name,
+                business_date=business_date,
+                cashier_name=cashier_name,
+                verified_by=verified_by or "System",
+                manager_notes=notes or "",
+                closing_fields=fields,
+            )
+
     except Exception as e:
-        print("Airtable update error:", e)
+        print("Airtable update or verification email error:", e)
         raise HTTPException(
             status_code=500,
             detail="Failed to update verification status"
