@@ -339,11 +339,9 @@ async def list_stores():
 # -----------------------------------------------------------
 # 🔐 AUTH — Users List + Login (using Airtable record ID)
 # -----------------------------------------------------------
-
 class UserLoginRequest(BaseModel):
     user_id: str
     pin: str
-
 
 @app.get("/auth/users")
 def list_users():
@@ -352,7 +350,9 @@ def list_users():
     """
 
     try:
-        records = AIRTABLE_USERS.all(formula="{Active}=TRUE()", max_records=200)
+        table = _airtable_table("users")
+
+        records = table.all(formula="{Active}=TRUE()", max_records=200)
         result = []
 
         for r in records:
@@ -380,7 +380,11 @@ def list_users():
             if isinstance(fields.get("Stores"), list) and fields["Stores"]:
                 store_obj = {
                     "id": fields["Stores"][0],
-                    "name": fields.get("Store (from Stores)")
+                    "name": (
+                        fields.get("Store (from Stores)", [""])[0]
+                        if isinstance(fields.get("Store (from Stores)"), list)
+                        else fields.get("Store (from Stores)")
+                    )
                 }
 
             # Case 2: fallback — first Store Access
@@ -404,7 +408,6 @@ def list_users():
         raise HTTPException(status_code=500, detail=str(e))
 
 
-
 @app.post("/auth/user-login")
 def user_login(payload: UserLoginRequest):
     """
@@ -412,7 +415,9 @@ def user_login(payload: UserLoginRequest):
     """
 
     try:
-        record = AIRTABLE_USERS.get(payload.user_id)
+        table = _airtable_table("users")
+
+        record = table.get(payload.user_id)
         if not record:
             raise HTTPException(status_code=401, detail="Invalid user selection")
 
@@ -448,7 +453,11 @@ def user_login(payload: UserLoginRequest):
         if isinstance(fields.get("Stores"), list) and fields["Stores"]:
             store_obj = {
                 "id": fields["Stores"][0],
-                "name": fields.get("Store (from Stores)")
+                "name": (
+                    fields.get("Store (from Stores)", [""])[0]
+                    if isinstance(fields.get("Store (from Stores)"), list)
+                    else fields.get("Store (from Stores)")
+                )
             }
 
         if not store_obj and store_access_list:
