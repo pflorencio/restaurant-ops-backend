@@ -632,7 +632,7 @@ def create_user(payload: UserCreate):
 
         fields = {
             "Name": payload.name,
-            "Pin": payload.pin,
+            "PIN": payload.pin,
             "Role": payload.role,
             "Active": payload.active if payload.active is not None else True,
             "Created At": now_iso,
