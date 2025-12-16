@@ -508,20 +508,23 @@ def update_user(user_id: str, payload: UserUpdate):
         current_fields = existing.get("fields", {})
 
         # ---------------------------------------------------
-        # Resolve final values (merge existing + payload)
+        # Resolve final values
         # ---------------------------------------------------
         role = payload.role or current_fields.get("Role")
 
         store = payload.store
         store_access = payload.store_access
 
-        # If not explicitly provided, retain current values
         if store is None:
             existing_store = current_fields.get("Store")
-            store = existing_store[0] if isinstance(existing_store, list) and existing_store else None
+            store = (
+                existing_store[0]
+                if isinstance(existing_store, list) and existing_store
+                else None
+            )
 
         if store_access is None:
-            store_access = current_fields.get("Store Access")
+            store_access = current_fields.get("Store Access") or []
 
         # ---------------------------------------------------
         # Validate role + store rules
@@ -532,20 +535,16 @@ def update_user(user_id: str, payload: UserUpdate):
             store_access=store_access,
         )
 
-        now_iso = datetime.utcnow().isoformat()
-
-        update_fields = {
-            "Updated At": now_iso,
-        }
+        update_fields = {}
 
         # ---------------------------------------------------
-        # Apply updates if present
+        # Apply updates
         # ---------------------------------------------------
         if payload.name is not None:
             update_fields["Name"] = payload.name
 
         if payload.pin is not None:
-            update_fields["Pin"] = payload.pin
+            update_fields["PIN"] = str(payload.pin)  # ✅ correct column
 
         if payload.role is not None:
             update_fields["Role"] = payload.role
@@ -557,35 +556,28 @@ def update_user(user_id: str, payload: UserUpdate):
             update_fields["Active"] = payload.active
 
         # ---------------------------------------------------
-        # Store logic by role
+        # Store logic
         # ---------------------------------------------------
         if role == "cashier":
-            # Cashier → exactly one store
-            store_id = store or (
-                store_access[0] if store_access else None
-            )
-
-            if not store_id:
+            if not store:
                 raise HTTPException(
                     status_code=400,
                     detail="Cashiers must be assigned to one store.",
                 )
 
-            update_fields["Store"] = [store_id]
-            update_fields["Store Access"] = [store_id]
+            update_fields["Store"] = [store]               # linked record
+            update_fields["Store Access"] = [store]       # label
 
         elif role == "manager":
             if store_access:
                 update_fields["Store Access"] = store_access
-            elif store:
-                update_fields["Store Access"] = [store]
 
-            update_fields.pop("Store", None)
+            if store:
+                update_fields["Store"] = [store]
 
         elif role == "admin":
-            # Admins don't need stores
-            update_fields.pop("Store", None)
-            update_fields.pop("Store Access", None)
+            update_fields["Store"] = []
+            update_fields["Store Access"] = []
 
         # ---------------------------------------------------
         # Update Airtable
@@ -618,7 +610,7 @@ def create_user(payload: UserCreate):
 
     try:
         # ---------------------------------------------------
-        # Validate role + store rules (shared logic)
+        # Validate role + store rules
         # ---------------------------------------------------
         validate_user_payload(
             role=payload.role,
@@ -626,83 +618,47 @@ def create_user(payload: UserCreate):
             store_access=payload.store_access,
         )
 
-        users_table = _airtable_table("users")
-        stores_table = _airtable_table("stores")
-
-        now_iso = datetime.utcnow().isoformat()
-
-        # ---------------------------------------------------
-        # Helper: resolve store IDs → store NAMES (Airtable-safe)
-        # ---------------------------------------------------
-        def resolve_store_names(store_ids: list[str]) -> list[str]:
-            if not store_ids:
-                return []
-
-            records = stores_table.all(
-                formula=f"OR({', '.join([f'RECORD_ID()=\"{sid}\"' for sid in store_ids])})"
-            )
-
-            return [
-                r["fields"]["Name"]
-                for r in records
-                if "Name" in r.get("fields", {})
-            ]
+        table = _airtable_table("users")
 
         fields = {
             "Name": payload.name,
-            "PIN": str(payload.pin),  # force string (safe even if already string)
+            "PIN": str(payload.pin),  # ✅ text field
             "Role": payload.role,
             "Active": payload.active if payload.active is not None else True,
-            "Created At": now_iso,
-            "Updated At": now_iso,
         }
 
-        # Optional email
         if payload.email:
             fields["Email"] = payload.email
 
-        # -----------------------------------------
-        # Store assignment logic (ID → NAME mapping)
-        # -----------------------------------------
+        # ---------------------------------------------------
+        # Store logic
+        # ---------------------------------------------------
         if payload.role == "cashier":
-            # Cashier → exactly one store
-            store_id = payload.store or (
+            store = payload.store or (
                 payload.store_access[0] if payload.store_access else None
             )
 
-            if not store_id:
+            if not store:
                 raise HTTPException(
                     status_code=400,
                     detail="Cashiers must be assigned to one store.",
                 )
 
-            store_names = resolve_store_names([store_id])
-
-            if not store_names:
-                raise HTTPException(
-                    status_code=400,
-                    detail="Invalid store reference.",
-                )
-
-            fields["Store"] = store_names
-            fields["Store Access"] = store_names
+            fields["Store"] = [store]            # linked record
+            fields["Store Access"] = [store]    # multiple select label
 
         elif payload.role == "manager":
-            store_ids = payload.store_access or (
-                [payload.store] if payload.store else []
-            )
+            if payload.store:
+                fields["Store"] = [payload.store]
 
-            store_names = resolve_store_names(store_ids)
+            if payload.store_access:
+                fields["Store Access"] = payload.store_access
 
-            if store_names:
-                fields["Store Access"] = store_names
+        elif payload.role == "admin":
+            fields["Store"] = []
+            fields["Store Access"] = []
 
-        # Admin → no store required
-
-        # -----------------------------------------
-        # Create record in Airtable
-        # -----------------------------------------
-        created = users_table.create(fields)
+        created = table.create(fields)
 
         return {
             "status": "created",
@@ -1675,7 +1631,6 @@ async def verify_closing(payload: dict):
         "Verified Status": status,
         "Verification Notes": notes or "",
         "Verified By": verified_by or "System",
-        "Last Updated At": now_iso,
         "Last Updated By": verified_by or "System",
     }
 
