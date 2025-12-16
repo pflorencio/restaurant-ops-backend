@@ -626,13 +626,31 @@ def create_user(payload: UserCreate):
             store_access=payload.store_access,
         )
 
-        table = _airtable_table("users")
+        users_table = _airtable_table("users")
+        stores_table = _airtable_table("stores")
 
         now_iso = datetime.utcnow().isoformat()
 
+        # ---------------------------------------------------
+        # Helper: resolve store IDs → store NAMES (Airtable-safe)
+        # ---------------------------------------------------
+        def resolve_store_names(store_ids: list[str]) -> list[str]:
+            if not store_ids:
+                return []
+
+            records = stores_table.all(
+                formula=f"OR({', '.join([f'RECORD_ID()=\"{sid}\"' for sid in store_ids])})"
+            )
+
+            return [
+                r["fields"]["Name"]
+                for r in records
+                if "Name" in r.get("fields", {})
+            ]
+
         fields = {
             "Name": payload.name,
-            "PIN": payload.pin,
+            "PIN": str(payload.pin),  # force string (safe even if already string)
             "Role": payload.role,
             "Active": payload.active if payload.active is not None else True,
             "Created At": now_iso,
@@ -644,7 +662,7 @@ def create_user(payload: UserCreate):
             fields["Email"] = payload.email
 
         # -----------------------------------------
-        # Store assignment logic
+        # Store assignment logic (ID → NAME mapping)
         # -----------------------------------------
         if payload.role == "cashier":
             # Cashier → exactly one store
@@ -658,21 +676,33 @@ def create_user(payload: UserCreate):
                     detail="Cashiers must be assigned to one store.",
                 )
 
-            fields["Store"] = [store_id]
-            fields["Store Access"] = [store_id]
+            store_names = resolve_store_names([store_id])
+
+            if not store_names:
+                raise HTTPException(
+                    status_code=400,
+                    detail="Invalid store reference.",
+                )
+
+            fields["Store"] = store_names
+            fields["Store Access"] = store_names
 
         elif payload.role == "manager":
-            if payload.store_access:
-                fields["Store Access"] = payload.store_access
-            elif payload.store:
-                fields["Store Access"] = [payload.store]
+            store_ids = payload.store_access or (
+                [payload.store] if payload.store else []
+            )
+
+            store_names = resolve_store_names(store_ids)
+
+            if store_names:
+                fields["Store Access"] = store_names
 
         # Admin → no store required
 
         # -----------------------------------------
         # Create record in Airtable
         # -----------------------------------------
-        created = table.create(fields)
+        created = users_table.create(fields)
 
         return {
             "status": "created",
