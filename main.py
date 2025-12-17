@@ -1537,6 +1537,53 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         print("❌ Error in patch_closing:", e)
         raise HTTPException(status_code=500, detail=str(e))
 
+# --------------------------------------------
+# Check if there is a closing that needs update
+# --------------------------------------------
+@app.get("/closings/needs-update")
+async def get_closing_needs_update(store_id: str):
+    """
+    Returns the most recent closing marked as 'Needs Update'
+    for the given store.
+    """
+
+    try:
+        # Airtable filter formula
+        formula = (
+            "AND("
+            "{Store ID} = '" + store_id + "',"
+            "{Verified Status} = 'Needs Update'"
+            ")"
+        )
+
+        # Query Airtable
+        records = airtable_closings.get_all(
+            formula=formula,
+            sort=["-Business Date"],
+            maxRecords=1,
+        )
+
+        if not records:
+            return {"exists": False}
+
+        record = records[0]
+        fields = record.get("fields", {})
+
+        return {
+            "exists": True,
+            "business_date": fields.get("Business Date"),
+            "store_name": (
+                fields.get("Store")[0]
+                if isinstance(fields.get("Store"), list)
+                else fields.get("Store")
+            ),
+            "notes": fields.get("Verification Notes", ""),
+        }
+
+    except Exception as e:
+        print("❌ needs-update error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to check updates")
+
 # -----------------------------------------------------------
 # Verification Queue — FAST, Airtable-filtered version
 # -----------------------------------------------------------
