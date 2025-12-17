@@ -1544,14 +1544,12 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
 async def get_closing_needs_update(store_id: str):
     """
     Returns the most recent closing marked as 'Needs Update'
-    for the given store_id.
+    for the given store.
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Airtable formula:
-        # - Linked Store contains store_id
-        # - Verified Status = Needs Update
+        # Linked-record-safe formula
         formula = (
             "AND("
             "FIND('{sid}', ARRAYJOIN({{Store}})),"
@@ -1584,7 +1582,7 @@ async def get_closing_needs_update(store_id: str):
         }
 
     except Exception as e:
-        print("❌ needs-update error:", e)
+        print("❌ needs-update error:", str(e))
         raise HTTPException(status_code=500, detail="Failed to check updates")
 
 # -----------------------------------------------------------
