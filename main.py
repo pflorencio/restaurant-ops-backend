@@ -1541,51 +1541,46 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
 # Check if there is a closing that needs update
 # --------------------------------------------
 @app.get("/closings/needs-update")
-async def get_closing_needs_update(
-    store_id: str = Query(..., description="Linked Store record ID")
-):
+async def get_closing_needs_update(store_id: str):
     """
     Returns the most recent closing marked as 'Needs Update'
-    for the given store.
+    for the given store_id.
     """
-
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Filter by Verified Status = Needs Update
-        formula = "{Verified Status}='Needs Update'"
+        # Airtable formula:
+        # - Linked Store contains store_id
+        # - Verified Status = Needs Update
+        formula = (
+            "AND("
+            "FIND('{sid}', ARRAYJOIN({{Store}})),"
+            "{{Verified Status}}='Needs Update'"
+            ")"
+        ).format(sid=store_id)
 
-        # Get recent records only
         records = table.all(
             formula=formula,
-            max_records=50
+            max_records=1,
+            sort=["-Date"],
         )
 
-        # Find the most recent matching this store_id
-        match = None
-        for r in records:
-            fields = r.get("fields", {})
-            linked_ids = fields.get("Store") or []
-
-            if isinstance(linked_ids, list) and store_id in linked_ids:
-                match = r
-                break
-
-        if not match:
+        if not records:
             return {"exists": False}
 
-        fields = match.get("fields", {})
+        r = records[0]
+        f = r.get("fields", {})
 
         return {
             "exists": True,
-            "business_date": fields.get("Date"),
+            "record_id": r.get("id"),
+            "business_date": f.get("Date"),
             "store_name": (
-                fields.get("Store Name")
-                or fields.get("Store Display")
-                or fields.get("Store Normalized")
+                f.get("Store Name")
+                or f.get("Store Display")
+                or f.get("Store Normalized")
             ),
-            "notes": fields.get("Verification Notes", ""),
-            "record_id": match.get("id"),
+            "notes": f.get("Verification Notes", ""),
         }
 
     except Exception as e:
