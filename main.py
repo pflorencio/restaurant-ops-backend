@@ -1594,43 +1594,36 @@ async def get_closings_needing_update(store_id: str):
     Returns ALL closings marked as 'Needs Update'
     for the given store.
 
-    IMPORTANT:
-    Daily Closings likely links to Stores via a Linked Record field.
-    Linked record values are Store NAMES (primary field), not record IDs.
-    So we must resolve store_id -> store_name first.
+    Store is a Linked Record field.
+    Linked record values = Store table PRIMARY FIELD ("Store"), not record IDs.
     """
     try:
         closings_table = _airtable_table(DAILY_CLOSINGS_TABLE)
-        stores_table = _airtable_table(STORES_TABLE)  # <-- make sure this constant exists
+        stores_table = _airtable_table(STORES_TABLE)
 
-        # 1) Resolve store_id -> store_name (primary field value)
+        # 1) Resolve store_id -> store name (primary field)
         store_record = stores_table.get(store_id)
         store_fields = store_record.get("fields", {}) if store_record else {}
 
-        store_name = (
-            store_fields.get("Store Name")
-            or store_fields.get("Name")
-        )
+        store_name = store_fields.get("Store")
 
         if not store_name:
             raise HTTPException(
                 status_code=400,
-                detail="Could not resolve store name from store_id. Check Stores table primary field.",
+                detail="Could not resolve store name from Stores table"
             )
 
-        # 2) Filter Daily Closings by:
-        # - Verified Status = Needs Update
-        # - Store linked record contains store_name (not store_id)
+        # 2) Filter Daily Closings
         formula = (
             "AND("
             "{{Verified Status}}='Needs Update',"
-            "FIND('{sname}', ARRAYJOIN({{Store}}))"
+            "FIND('{store}', ARRAYJOIN({{Store}}))"
             ")"
-        ).format(sname=str(store_name).replace("'", "\\'"))
+        ).format(store=str(store_name).replace("'", "\\'"))
 
         records = closings_table.all(
             formula=formula,
-            sort=["Date"],  # oldest → newest
+            sort=["Date"]  # oldest → newest
         )
 
         results = []
@@ -1652,6 +1645,7 @@ async def get_closings_needing_update(store_id: str):
     except Exception as e:
         print("❌ needs-update-list error:", str(e))
         raise HTTPException(status_code=500, detail="Failed to load update list")
+
 
 # -----------------------------------------------------------
 # Verification Queue — FAST, Airtable-filtered version
