@@ -1589,7 +1589,7 @@ async def get_closing_needs_update(store_id: str):
 # List all closings that need update (per store)
 # --------------------------------------------
 @app.get("/closings/needs-update-list")
-async def get_closings_needing_update(store_name: str):
+async def get_closings_needing_update(store_id: str):
     """
     Returns ALL closings marked as 'Needs Update'
     for the given store.
@@ -1597,12 +1597,13 @@ async def get_closings_needing_update(store_name: str):
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
+        # ✅ Linked-record safe formula (DO NOT use Store Name)
         formula = (
             "AND("
-            "{{Verified Status}}='Needs Update',"
-            "{{Store Name}}='{store_name}'"
+            "FIND('{sid}', ARRAYJOIN({{Store}})),"
+            "{{Verified Status}}='Needs Update'"
             ")"
-        ).format(store_name=store_name)
+        ).format(sid=store_id)
 
         records = table.all(
             formula=formula,
