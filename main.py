@@ -1585,6 +1585,48 @@ async def get_closing_needs_update(store_id: str):
         print("❌ needs-update error:", str(e))
         raise HTTPException(status_code=500, detail="Failed to check updates")
 
+# --------------------------------------------
+# List all closings that need update (per store)
+# --------------------------------------------
+@app.get("/closings/needs-update-list")
+async def get_closings_needing_update(store_id: str):
+    """
+    Returns ALL closings marked as 'Needs Update'
+    for the given store.
+    """
+    try:
+        table = _airtable_table(DAILY_CLOSINGS_TABLE)
+
+        formula = (
+            "AND("
+            "FIND('{sid}', ARRAYJOIN({{Store}})),"
+            "{{Verified Status}}='Needs Update'"
+            ")"
+        ).format(sid=store_id)
+
+        records = table.all(
+            formula=formula,
+            sort=["Date"],  # oldest → newest
+        )
+
+        results = []
+        for r in records:
+            f = r.get("fields", {})
+            results.append({
+                "record_id": r.get("id"),
+                "business_date": f.get("Date"),
+                "notes": f.get("Verification Notes", ""),
+            })
+
+        return {
+            "count": len(results),
+            "records": results,
+        }
+
+    except Exception as e:
+        print("❌ needs-update-list error:", str(e))
+        raise HTTPException(status_code=500, detail="Failed to load update list")
+
 # -----------------------------------------------------------
 # Verification Queue — FAST, Airtable-filtered version
 # -----------------------------------------------------------
