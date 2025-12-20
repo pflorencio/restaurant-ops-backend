@@ -1578,7 +1578,7 @@ async def get_closing_needs_update(store_id: str):
                 or f.get("Store Display")
                 or f.get("Store Normalized")
             ),
-            "notes": f.get("Verification Notes", ""),
+            "notes": (f.get("Verification Notes") or "").strip(),
         }
 
     except Exception as e:
