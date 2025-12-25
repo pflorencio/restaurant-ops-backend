@@ -10,6 +10,8 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field, RootModel
 from dotenv import load_dotenv
 from pyairtable import Table
+from fastapi import Query
+from datetime import date as dt_date
 
 from email_service import (
     send_closing_submission_email,
@@ -418,6 +420,60 @@ def lock_weekly_budget(payload: dict):
 
     table.update(budget_id, updates)
     return {"status": "locked"}
+
+# -----------------------------------------------------------
+# 📊 Weekly Budget – Read (Frontend)
+# -----------------------------------------------------------
+@app.get("/weekly-budget")
+async def get_weekly_budget(
+    store_id: str = Query(...),
+    date: str = Query(...)
+):
+    """
+    Returns weekly budget context for a store + date.
+    Week starts on Monday.
+    """
+
+    try:
+        business_date = dt_date.fromisoformat(date)
+    except Exception:
+        raise HTTPException(status_code=400, detail="Invalid date format")
+
+    week_start = monday_of_week(business_date).isoformat()
+    week_end = (monday_of_week(business_date) + timedelta(days=6)).isoformat()
+
+    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+
+    formula = (
+        "AND("
+        f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+        f"{{Week Start}}='{week_start}'"
+        ")"
+    )
+
+    records = table.all(formula=formula, max_records=1)
+
+    if not records:
+        return {"exists": False}
+
+    record = records[0]
+    fields = record.get("fields", {})
+
+    weekly_budget = float(fields.get("Weekly Budget", 0) or 0)
+    remaining_budget = float(fields.get("Remaining Budget", 0) or 0)
+
+    daily_envelope = weekly_budget / 7 if weekly_budget else 0
+
+    return {
+        "exists": True,
+        "store_id": store_id,
+        "week_start": week_start,
+        "week_end": week_end,
+        "weekly_budget": weekly_budget,
+        "remaining_budget": remaining_budget,
+        "daily_envelope": daily_envelope,
+        "status": fields.get("Status", "Draft"),
+    }
 
 # -----------------------------------------------------------
 # 🔐 AUTH — Users List + Login (using Airtable record ID)
@@ -1791,6 +1847,17 @@ def get_history(
 # -----------------------------------------------------------
 @app.post("/verify")
 async def verify_closing(payload: dict):
+    """
+    Update verification status, notes, and lock state for a closing record.
+    Expected payload from frontend:
+    {
+      "record_id": "recXXXX",
+      "status": "Verified" | "Needs Update" | "Pending",
+      "verified_by": "Patrick Manager",
+      "notes": "Some notes here"
+    }
+    """
+
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
@@ -1800,65 +1867,54 @@ async def verify_closing(payload: dict):
         raise HTTPException(status_code=400, detail="Missing record_id or status")
 
     now_iso = datetime.utcnow().isoformat()
+
     table = _airtable_table("daily_closing")
-
-    # -------------------------------------------------------
-    # Base fields that always update
-    # -------------------------------------------------------
-    update_fields = {
-        "Verified Status": status,
-        "Verification Notes": notes or "",
-        "Verified By": verified_by or "System",
-        "Last Updated By": verified_by or "System",
-    }
-
-    if status == "Verified":
-        update_fields["Verified At"] = now_iso
-        update_fields["Lock Status"] = "Locked"
-    else:
-        update_fields["Verified At"] = None
-        update_fields["Lock Status"] = "Unlocked"
 
     try:
         # ---------------------------------------------------
-        # Update verification fields
+        # 0) Fetch BEFORE update (needed for delta + reversal)
+        # ---------------------------------------------------
+        before = table.get(record_id)
+        before_fields = before.get("fields", {}) if before else {}
+
+        prev_status = (before_fields.get("Verified Status") or "").strip()
+        prev_food_deducted = float(before_fields.get("Food Cost Deducted", 0) or 0)
+
+        # -------------------------------------------------------
+        # 1) Base fields that always update
+        # -------------------------------------------------------
+        update_fields = {
+            "Verified Status": status,
+            "Verification Notes": notes or "",
+            "Verified By": verified_by or "System",
+            "Last Updated By": verified_by or "System",
+        }
+
+        # -------------------------------------------------------
+        # 2) Locking behaviour
+        # -------------------------------------------------------
+        if status == "Verified":
+            update_fields["Verified At"] = now_iso
+            update_fields["Lock Status"] = "Locked"
+        else:
+            update_fields["Verified At"] = None
+            update_fields["Lock Status"] = "Unlocked"
+
+        # ---------------------------------------------------
+        # 3) Update Airtable record
         # ---------------------------------------------------
         table.update(record_id, update_fields)
 
         # ---------------------------------------------------
-        # Only proceed if VERIFIED
+        # Helper: locate the locked weekly budget row
         # ---------------------------------------------------
-        if status != "Verified":
-            return {"status": "success", "record_id": record_id}
+        def get_locked_weekly_budget_record(fields: dict):
+            store_ids = fields.get("Store") or []
+            business_date_str = fields.get("Date")
 
-        # ---------------------------------------------------
-        # Fetch fresh record
-        # ---------------------------------------------------
-        fresh = table.get(record_id)
-        fields = fresh.get("fields", {})
+            if not store_ids or not business_date_str:
+                return None, None, None  # (budget_table, budget_record, week_start)
 
-        # ---------------------------------------------------
-        # 🛑 IDEMPOTENCY GUARD
-        # ---------------------------------------------------
-        already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
-        if already_deducted > 0:
-            print("Skipping budget deduction — already deducted:", already_deducted)
-            return {"status": "success", "record_id": record_id}
-
-        # ---------------------------------------------------
-        # Calculate food spend (Kitchen + Bar only)
-        # ---------------------------------------------------
-        food_spend = food_spend_from_fields(fields)
-        if food_spend <= 0:
-            return {"status": "success", "record_id": record_id}
-
-        # ---------------------------------------------------
-        # Weekly budget deduction
-        # ---------------------------------------------------
-        store_ids = fields.get("Store") or []
-        business_date_str = fields.get("Date")
-
-        if store_ids and business_date_str:
             store_id = store_ids[0]
             business_date = dt_date.fromisoformat(business_date_str)
             week_start = monday_of_week(business_date).isoformat()
@@ -1873,53 +1929,120 @@ async def verify_closing(payload: dict):
                 ")"
             )
 
-            budgets = budget_table.all(formula=formula, max_records=1)
+            records = budget_table.all(formula=formula, max_records=1)
+            if not records:
+                return budget_table, None, week_start
 
-            if budgets:
-                budget = budgets[0]
-                remaining = float(budget["fields"].get("Remaining Budget", 0) or 0)
-
-                # Update weekly budget
-                budget_table.update(
-                    budget["id"],
-                    {
-                        "Remaining Budget": remaining - food_spend,
-                        "Food Cost Deducted": (
-                            float(budget["fields"].get("Food Cost Deducted", 0) or 0)
-                            + food_spend
-                        ),
-                        "Last Updated At": now_iso,
-                    },
-                )
-
-                # ✅ Mark closing as deducted
-                table.update(
-                    record_id,
-                    {
-                        "Food Cost Deducted": food_spend,
-                    },
-                )
+            return budget_table, records[0], week_start
 
         # ---------------------------------------------------
-        # Send verification email
+        # 4) Weekly budget adjustment logic
+        #    - delta-based if re-verified
+        #    - reversal if un-verified
         # ---------------------------------------------------
-        send_closing_verification_email(
-            store_name=fields.get("Store Name") or "Unknown Store",
-            business_date=fields.get("Date"),
-            cashier_name=fields.get("Submitted By"),
-            verified_by=verified_by or "System",
-            manager_notes=notes or "",
-            closing_fields=fields,
-        )
+        # Fetch fresh copy including formulas AFTER update
+        fresh = table.get(record_id)
+        fields = fresh.get("fields", {}) if fresh else {}
+
+        # If we are verifying now → apply delta
+        if status == "Verified":
+            try:
+                budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
+                if budget_record:
+                    remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
+                    already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
+
+                    # Compute new food spend (Kitchen + Bar only)
+                    new_food_spend = float(food_spend_from_fields(fields) or 0)
+
+                    # Delta vs whatever was previously deducted on this closing
+                    # Prefer BEFORE snapshot if present; otherwise fall back to field value
+                    baseline = prev_food_deducted if prev_food_deducted > 0 else already_deducted
+                    delta = new_food_spend - baseline
+
+                    if abs(delta) > 0.0001:
+                        # Update weekly budget remaining + running deducted tally
+                        prev_running_deducted = float(
+                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        )
+
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Remaining Budget": remaining - delta,
+                                "Food Cost Deducted": prev_running_deducted + delta,
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                    # Stamp closing with the final deducted value (acts as idempotency anchor)
+                    # (This makes future re-verifies delta-safe)
+                    table.update(
+                        record_id,
+                        {
+                            "Food Cost Deducted": new_food_spend,
+                        },
+                    )
+            except Exception as budget_err:
+                # Do NOT fail verification if budget update fails
+                print("Weekly budget update error:", budget_err)
+
+        # If we are UN-verifying (e.g., Needs Update) and it used to be Verified → reverse
+        else:
+            if prev_status == "Verified" and prev_food_deducted > 0:
+                try:
+                    budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
+                    if budget_record:
+                        remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
+                        prev_running_deducted = float(
+                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        )
+
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Remaining Budget": remaining + prev_food_deducted,
+                                "Food Cost Deducted": max(0, prev_running_deducted - prev_food_deducted),
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                    # Reset the closing anchor
+                    table.update(record_id, {"Food Cost Deducted": 0})
+                except Exception as budget_err:
+                    print("Weekly budget reversal error:", budget_err)
+
+        # ---------------------------------------------------
+        # 5) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
+        # ---------------------------------------------------
+        if status == "Verified":
+            store_name = (
+                fields.get("Store Name")
+                or fields.get("Store Normalized")
+                or "Unknown Store"
+            )
+
+            business_date = fields.get("Date")
+            cashier_name = fields.get("Submitted By")
+
+            send_closing_verification_email(
+                store_name=store_name,
+                business_date=business_date,
+                cashier_name=cashier_name,
+                verified_by=verified_by or "System",
+                manager_notes=notes or "",
+                closing_fields=fields,
+            )
 
     except Exception as e:
-        print("Verification error:", e)
-        raise HTTPException(status_code=500, detail="Verification failed")
+        print("Airtable update or verification email error:", e)
+        raise HTTPException(status_code=500, detail="Failed to update verification status")
 
     return {
         "status": "success",
         "record_id": record_id,
         "new_status": status,
+        "notes_saved": notes or "",
     }
 
 # -----------------------------------------------------------
