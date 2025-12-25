@@ -1849,13 +1849,6 @@ def get_history(
 async def verify_closing(payload: dict):
     """
     Update verification status, notes, and lock state for a closing record.
-    Expected payload from frontend:
-    {
-      "record_id": "recXXXX",
-      "status": "Verified" | "Needs Update" | "Pending",
-      "verified_by": "Patrick Manager",
-      "notes": "Some notes here"
-    }
     """
 
     record_id = payload.get("record_id")
@@ -1867,7 +1860,6 @@ async def verify_closing(payload: dict):
         raise HTTPException(status_code=400, detail="Missing record_id or status")
 
     now_iso = datetime.utcnow().isoformat()
-
     table = _airtable_table("daily_closing")
 
     try:
@@ -1879,6 +1871,7 @@ async def verify_closing(payload: dict):
 
         prev_status = (before_fields.get("Verified Status") or "").strip()
         prev_food_deducted = float(before_fields.get("Food Cost Deducted", 0) or 0)
+        was_budget_deducted = bool(before_fields.get("Weekly Budget Deducted"))
 
         # -------------------------------------------------------
         # 1) Base fields that always update
@@ -1909,13 +1902,16 @@ async def verify_closing(payload: dict):
         # Helper: locate the locked weekly budget row
         # ---------------------------------------------------
         def get_locked_weekly_budget_record(fields: dict):
-            store_ids = fields.get("Store") or []
+            store_name = (
+                fields.get("Store Name")
+                or fields.get("Store Normalized")
+                or ""
+            )
             business_date_str = fields.get("Date")
 
-            if not store_ids or not business_date_str:
-                return None, None, None  # (budget_table, budget_record, week_start)
+            if not store_name or not business_date_str:
+                return None, None, None
 
-            store_id = store_ids[0]
             business_date = dt_date.fromisoformat(business_date_str)
             week_start = monday_of_week(business_date).isoformat()
 
@@ -1923,11 +1919,13 @@ async def verify_closing(payload: dict):
 
             formula = (
                 "AND("
-                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+                f"FIND('{store_name}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
                 "{{Status}}='Locked'"
                 ")"
             )
+
+            print("Weekly budget lookup:", store_name, week_start)
 
             records = budget_table.all(formula=formula, max_records=1)
             if not records:
@@ -1937,31 +1935,24 @@ async def verify_closing(payload: dict):
 
         # ---------------------------------------------------
         # 4) Weekly budget adjustment logic
-        #    - delta-based if re-verified
-        #    - reversal if un-verified
         # ---------------------------------------------------
-        # Fetch fresh copy including formulas AFTER update
         fresh = table.get(record_id)
         fields = fresh.get("fields", {}) if fresh else {}
 
-        # If we are verifying now → apply delta
+        # =========================
+        # VERIFYING
+        # =========================
         if status == "Verified":
             try:
-                budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
-                if budget_record:
-                    remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                    already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
+                # 🔒 Idempotency guard
+                if was_budget_deducted:
+                    print("Skipping weekly budget deduction — already deducted")
+                else:
+                    budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
+                    if budget_record:
+                        remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
 
-                    # Compute new food spend (Kitchen + Bar only)
-                    new_food_spend = float(food_spend_from_fields(fields) or 0)
-
-                    # Delta vs whatever was previously deducted on this closing
-                    # Prefer BEFORE snapshot if present; otherwise fall back to field value
-                    baseline = prev_food_deducted if prev_food_deducted > 0 else already_deducted
-                    delta = new_food_spend - baseline
-
-                    if abs(delta) > 0.0001:
-                        # Update weekly budget remaining + running deducted tally
+                        new_food_spend = float(food_spend_from_fields(fields) or 0)
                         prev_running_deducted = float(
                             budget_record["fields"].get("Food Cost Deducted", 0) or 0
                         )
@@ -1969,27 +1960,28 @@ async def verify_closing(payload: dict):
                         budget_table.update(
                             budget_record["id"],
                             {
-                                "Remaining Budget": remaining - delta,
-                                "Food Cost Deducted": prev_running_deducted + delta,
+                                "Remaining Budget": remaining - new_food_spend,
+                                "Food Cost Deducted": prev_running_deducted + new_food_spend,
                                 "Last Updated At": now_iso,
                             },
                         )
 
-                    # Stamp closing with the final deducted value (acts as idempotency anchor)
-                    # (This makes future re-verifies delta-safe)
-                    table.update(
-                        record_id,
-                        {
-                            "Food Cost Deducted": new_food_spend,
-                        },
-                    )
+                        # Anchor idempotency on the closing
+                        table.update(
+                            record_id,
+                            {
+                                "Food Cost Deducted": new_food_spend,
+                                "Weekly Budget Deducted": True,
+                            },
+                        )
             except Exception as budget_err:
-                # Do NOT fail verification if budget update fails
                 print("Weekly budget update error:", budget_err)
 
-        # If we are UN-verifying (e.g., Needs Update) and it used to be Verified → reverse
+        # =========================
+        # UN-VERIFYING (REVERSAL)
+        # =========================
         else:
-            if prev_status == "Verified" and prev_food_deducted > 0:
+            if prev_status == "Verified" and prev_food_deducted > 0 and was_budget_deducted:
                 try:
                     budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
                     if budget_record:
@@ -2007,8 +1999,14 @@ async def verify_closing(payload: dict):
                             },
                         )
 
-                    # Reset the closing anchor
-                    table.update(record_id, {"Food Cost Deducted": 0})
+                    # Reset anchors
+                    table.update(
+                        record_id,
+                        {
+                            "Food Cost Deducted": 0,
+                            "Weekly Budget Deducted": False,
+                        }
+                    )
                 except Exception as budget_err:
                     print("Weekly budget reversal error:", budget_err)
 
@@ -2022,13 +2020,10 @@ async def verify_closing(payload: dict):
                 or "Unknown Store"
             )
 
-            business_date = fields.get("Date")
-            cashier_name = fields.get("Submitted By")
-
             send_closing_verification_email(
                 store_name=store_name,
-                business_date=business_date,
-                cashier_name=cashier_name,
+                business_date=fields.get("Date"),
+                cashier_name=fields.get("Submitted By"),
                 verified_by=verified_by or "System",
                 manager_notes=notes or "",
                 closing_fields=fields,
