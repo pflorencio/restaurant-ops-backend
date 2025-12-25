@@ -91,6 +91,10 @@ def _airtable_table(table_key: str) -> Table:
             "id_env": "AIRTABLE_USERS_TABLE_ID",
             "default_name": "Users",
         },
+        "weekly_budgets": {
+            "id_env": "AIRTABLE_WEEKLY_BUDGETS_TABLE_ID",
+            "default_name": "Weekly Budgets",
+        },
     }
 
     if table_key not in table_configs:
@@ -112,6 +116,7 @@ DAILY_CLOSINGS_TABLE = "daily_closing"
 HISTORY_TABLE = "history"
 STORES_TABLE = "stores"
 USERS_TABLE = "users"
+WEEKLY_BUDGETS_TABLE = "weekly_budgets"
 
 
 # -----------------------------------------------------------
@@ -135,6 +140,17 @@ def normalize_store_value(store: Optional[str]) -> str:
         .replace("’", "")
         .replace("‘", "")
         .replace("'", "")
+    )
+
+from datetime import timedelta
+
+def monday_of_week(d: dt_date) -> dt_date:
+    return d - timedelta(days=d.weekday())
+
+def food_spend_from_fields(fields: dict) -> float:
+    return (
+        float(fields.get("Kitchen Budget", 0) or 0)
+        + float(fields.get("Bar Budget", 0) or 0)
     )
 
 # -----------------------------------------------------------
@@ -340,6 +356,68 @@ async def list_stores():
             })
 
     return stores
+
+# -----------------------------------------------------------
+# WEEKLY BUDGETS
+# -----------------------------------------------------------
+@app.get("/weekly-budgets")
+def get_weekly_budget(
+    store_id: str,
+    business_date: str,
+):
+    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+    week_start = monday_of_week(dt_date.fromisoformat(business_date)).isoformat()
+
+    formula = (
+        "AND("
+        f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+        f"{{Week Start}}='{week_start}'"
+        ")"
+    )
+
+    records = table.all(formula=formula, max_records=1)
+    if not records:
+        return {"status": "missing"}
+
+    r = records[0]
+    return {
+        "status": "found",
+        "id": r["id"],
+        "fields": r["fields"],
+    }
+
+@app.post("/weekly-budgets/lock")
+def lock_weekly_budget(payload: dict):
+    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+
+    budget_id = payload["budget_id"]
+    weekly_budget = float(payload["weekly_budget"])
+    locked_by = payload.get("locked_by", "System")
+
+    # Recalculate remaining based on VERIFIED closings
+    closings = _airtable_table(DAILY_CLOSINGS_TABLE)
+    week_start = payload["week_start"]
+
+    formula = (
+        "AND("
+        f"{{Verified Status}}='Verified',"
+        f"IS_AFTER({{Date}}, '{week_start}')"
+        ")"
+    )
+
+    records = closings.all(formula=formula)
+    spent = sum(food_spend_from_fields(r["fields"]) for r in records)
+
+    updates = {
+        "Weekly Budget Amount": weekly_budget,
+        "Remaining Budget": weekly_budget - spent,
+        "Status": "Locked",
+        "Locked At": datetime.utcnow().isoformat(),
+        "Locked By": locked_by,
+    }
+
+    table.update(budget_id, updates)
+    return {"status": "locked"}
 
 # -----------------------------------------------------------
 # 🔐 AUTH — Users List + Login (using Airtable record ID)
@@ -1713,17 +1791,6 @@ def get_history(
 # -----------------------------------------------------------
 @app.post("/verify")
 async def verify_closing(payload: dict):
-    """
-    Update verification status, notes, and lock state for a closing record.
-    Expected payload from frontend:
-    {
-      "record_id": "recXXXX",
-      "status": "Verified" | "Needs Update" | "Pending",
-      "verified_by": "Patrick Manager",
-      "notes": "Some notes here"
-    }
-    """
-
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
@@ -1733,6 +1800,7 @@ async def verify_closing(payload: dict):
         raise HTTPException(status_code=400, detail="Missing record_id or status")
 
     now_iso = datetime.utcnow().isoformat()
+    table = _airtable_table("daily_closing")
 
     # -------------------------------------------------------
     # Base fields that always update
@@ -1744,9 +1812,6 @@ async def verify_closing(payload: dict):
         "Last Updated By": verified_by or "System",
     }
 
-    # -------------------------------------------------------
-    # Locking behaviour
-    # -------------------------------------------------------
     if status == "Verified":
         update_fields["Verified At"] = now_iso
         update_fields["Lock Status"] = "Locked"
@@ -1756,51 +1821,105 @@ async def verify_closing(payload: dict):
 
     try:
         # ---------------------------------------------------
-        # Update Airtable record
+        # Update verification fields
         # ---------------------------------------------------
-        table = _airtable_table("daily_closing")
         table.update(record_id, update_fields)
 
         # ---------------------------------------------------
-        # 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
+        # Only proceed if VERIFIED
         # ---------------------------------------------------
-        if status == "Verified":
-            # Fetch fresh copy including formulas
-            fresh = table.get(record_id)
-            fields = fresh.get("fields", {})
+        if status != "Verified":
+            return {"status": "success", "record_id": record_id}
 
-            # Resolve store name safely
-            store_name = (
-                fields.get("Store Name")
-                or fields.get("Store Normalized")
-                or "Unknown Store"
+        # ---------------------------------------------------
+        # Fetch fresh record
+        # ---------------------------------------------------
+        fresh = table.get(record_id)
+        fields = fresh.get("fields", {})
+
+        # ---------------------------------------------------
+        # 🛑 IDEMPOTENCY GUARD
+        # ---------------------------------------------------
+        already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
+        if already_deducted > 0:
+            print("Skipping budget deduction — already deducted:", already_deducted)
+            return {"status": "success", "record_id": record_id}
+
+        # ---------------------------------------------------
+        # Calculate food spend (Kitchen + Bar only)
+        # ---------------------------------------------------
+        food_spend = food_spend_from_fields(fields)
+        if food_spend <= 0:
+            return {"status": "success", "record_id": record_id}
+
+        # ---------------------------------------------------
+        # Weekly budget deduction
+        # ---------------------------------------------------
+        store_ids = fields.get("Store") or []
+        business_date_str = fields.get("Date")
+
+        if store_ids and business_date_str:
+            store_id = store_ids[0]
+            business_date = dt_date.fromisoformat(business_date_str)
+            week_start = monday_of_week(business_date).isoformat()
+
+            budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+
+            formula = (
+                "AND("
+                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+                f"{{Week Start}}='{week_start}',"
+                "{{Status}}='Locked'"
+                ")"
             )
 
-            business_date = fields.get("Date")
-            cashier_name = fields.get("Submitted By")
+            budgets = budget_table.all(formula=formula, max_records=1)
 
-            # Send verification summary email (non-blocking)
-            send_closing_verification_email(
-                store_name=store_name,
-                business_date=business_date,
-                cashier_name=cashier_name,
-                verified_by=verified_by or "System",
-                manager_notes=notes or "",
-                closing_fields=fields,
-            )
+            if budgets:
+                budget = budgets[0]
+                remaining = float(budget["fields"].get("Remaining Budget", 0) or 0)
+
+                # Update weekly budget
+                budget_table.update(
+                    budget["id"],
+                    {
+                        "Remaining Budget": remaining - food_spend,
+                        "Food Cost Deducted": (
+                            float(budget["fields"].get("Food Cost Deducted", 0) or 0)
+                            + food_spend
+                        ),
+                        "Last Updated At": now_iso,
+                    },
+                )
+
+                # ✅ Mark closing as deducted
+                table.update(
+                    record_id,
+                    {
+                        "Food Cost Deducted": food_spend,
+                    },
+                )
+
+        # ---------------------------------------------------
+        # Send verification email
+        # ---------------------------------------------------
+        send_closing_verification_email(
+            store_name=fields.get("Store Name") or "Unknown Store",
+            business_date=fields.get("Date"),
+            cashier_name=fields.get("Submitted By"),
+            verified_by=verified_by or "System",
+            manager_notes=notes or "",
+            closing_fields=fields,
+        )
 
     except Exception as e:
-        print("Airtable update or verification email error:", e)
-        raise HTTPException(
-            status_code=500,
-            detail="Failed to update verification status"
-        )
+        print("Verification error:", e)
+        raise HTTPException(status_code=500, detail="Verification failed")
 
     return {
         "status": "success",
         "record_id": record_id,
         "new_status": status,
-        "notes_saved": notes or "",
     }
 
 # -----------------------------------------------------------
