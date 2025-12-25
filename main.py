@@ -403,7 +403,8 @@ def lock_weekly_budget(payload: dict):
     formula = (
         "AND("
         f"{{Verified Status}}='Verified',"
-        f"IS_AFTER({{Date}}, '{week_start}')"
+        f"IS_AFTER({{Date}}, '{week_start}'),"
+        f"FIND('{payload['store_id']}', ARRAYJOIN({{Store}}))"
         ")"
     )
 
@@ -459,7 +460,7 @@ async def get_weekly_budget(
     record = records[0]
     fields = record.get("fields", {})
 
-    weekly_budget = float(fields.get("Weekly Budget", 0) or 0)
+    weekly_budget = float(fields.get("Weekly Budget Amount", 0) or 0)
     remaining_budget = float(fields.get("Remaining Budget", 0) or 0)
 
     daily_envelope = weekly_budget / 7 if weekly_budget else 0
@@ -936,12 +937,13 @@ def _log_history(
 
         # If store is a linked-record list, resolve name
         store_ids = snap.get("Store")
-        if isinstance(store_ids, list) and len(store_ids) > 0:
+        if isinstance(store_ids, list) and store_ids:
             try:
-                store_rec = AIRTABLE_STORES.get(store_ids[0])
+                stores_table = _airtable_table(STORES_TABLE)
+                store_rec = stores_table.get(store_ids[0])
                 store_name = store_rec.get("fields", {}).get("Store") or store_name
-            except Exception:
-                pass
+            except Exception as e:
+                print("⚠️ History store resolve failed:", e)
 
         if not store_name:
             store_name = (
@@ -1003,7 +1005,8 @@ def upsert_closing(payload: ClosingCreate):
         # -----------------------------------------
         if not store_name and store_id:
             try:
-                rec = AIRTABLE_STORES.get(store_id)
+                stores_table = _airtable_table(STORES_TABLE)
+                rec = stores_table.get(store_id)
                 store_name = rec.get("fields", {}).get("Store", "")
                 print(f"Resolved store_name → {store_name}")
             except Exception as e:
@@ -1902,16 +1905,13 @@ async def verify_closing(payload: dict):
         # Helper: locate the locked weekly budget row
         # ---------------------------------------------------
         def get_locked_weekly_budget_record(fields: dict):
-            store_name = (
-                fields.get("Store Name")
-                or fields.get("Store Normalized")
-                or ""
-            )
+            store_ids = fields.get("Store") or []
             business_date_str = fields.get("Date")
 
-            if not store_name or not business_date_str:
+            if not store_ids or not business_date_str:
                 return None, None, None
 
+            store_id = store_ids[0]  # Airtable record ID
             business_date = dt_date.fromisoformat(business_date_str)
             week_start = monday_of_week(business_date).isoformat()
 
@@ -1919,13 +1919,16 @@ async def verify_closing(payload: dict):
 
             formula = (
                 "AND("
-                f"FIND('{store_name}', ARRAYJOIN({{Store}})),"
+                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
                 "{{Status}}='Locked'"
                 ")"
             )
 
-            print("Weekly budget lookup:", store_name, week_start)
+            print("Weekly budget lookup:")
+            print("Store ID:", store_id)
+            print("Week start:", week_start)
+            print("Formula:", formula)
 
             records = budget_table.all(formula=formula, max_records=1)
             if not records:
