@@ -372,7 +372,7 @@ async def list_stores():
 # WEEKLY BUDGETS
 # -----------------------------------------------------------
 @app.get("/weekly-budgets")
-def get_weekly_budget(
+def get_weekly_budget_raw(
     store_id: str,
     business_date: str,
 ):
@@ -412,7 +412,7 @@ def lock_weekly_budget(payload: dict):
     formula = (
         "AND("
         f"{{Verified Status}}='Verified',"
-        f"IS_AFTER({{Date}}, '{week_start}'),"
+        f"IS_SAME_OR_AFTER({{Date}}, '{week_start}'),"
         f"FIND('{payload['store_id']}', ARRAYJOIN({{Store}}))"
         ")"
     )
@@ -1699,7 +1699,7 @@ async def get_closing_needs_update(store_id: str):
         formula = (
             "AND("
             "FIND('{sid}', ARRAYJOIN({{Store}})),"
-            "{{Verified Status}}='Needs Update'"
+            "{Verified Status}='Needs Update'"
             ")"
         ).format(sid=store_id)
 
@@ -1762,7 +1762,7 @@ async def get_closings_needing_update(store_id: str):
         # 2) Filter Daily Closings
         formula = (
             "AND("
-            "{{Verified Status}}='Needs Update',"
+            "{Verified Status}='Needs Update',"
             "FIND('{store}', ARRAYJOIN({{Store}}))"
             ")"
         ).format(store=str(store_name).replace("'", "\\'"))
@@ -1915,41 +1915,48 @@ async def verify_closing(payload: dict):
         # ---------------------------------------------------
         def get_locked_weekly_budget_record(fields: dict):
             store_ids = fields.get("Store") or []
-            business_date_str = fields.get("Date")
+            business_date_raw = fields.get("Date")
 
-            if not store_ids or not business_date_str:
+            if not store_ids or not business_date_raw:
                 return None, None, None
 
-            store_id = store_ids[0]  # Airtable record ID
+            store_id = store_ids[0]  # Airtable record id (recXXXX)
 
-            # ✅ SAFE date parsing (fixes week shift bug)
-            business_date = parse_airtable_date(business_date_str)
+            # Robust date parsing (Airtable Date may include time / Z)
+            try:
+                business_date = parse_airtable_date(business_date_raw)
+            except Exception:
+                business_date = dt_date.fromisoformat(str(business_date_raw)[:10])
+
             week_start = monday_of_week(business_date).isoformat()
 
-            # ✅ Resolve Weekly Budgets table safely
-            budget_table = _airtable_table("weekly_budgets")
-            if not budget_table:
-                print("⚠️ Weekly Budgets table not configured")
-                return None, None, week_start
+            budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-            # ✅ Correct Airtable formula for linked records
+            # ✅ Linked-record-safe + correct Airtable field refs
+            # IMPORTANT:
+            # - ARRAYJOIN({Store}) is needed for linked record fields
+            # - {Status} must be SINGLE braces in Airtable, so in Python:
+            #   - inside an f-string: use "{{Status}}" to output "{Status}"
+            #   - inside a normal string: use "{Status}" directly
             formula = (
                 "AND("
                 f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
-                "{{Status}}='Locked'"
+                "{Status}='Locked'"
                 ")"
             )
 
             print("Weekly budget lookup:")
             print("Store ID:", store_id)
+            print("Business date raw:", business_date_raw)
+            print("Parsed business date:", business_date.isoformat())
             print("Week start:", week_start)
             print("Formula:", formula)
 
             records = budget_table.all(formula=formula, max_records=1)
+            print("Weekly budget records found:", len(records))
 
             if not records:
-                print("⚠️ No locked weekly budget record found")
                 return budget_table, None, week_start
 
             return budget_table, records[0], week_start
