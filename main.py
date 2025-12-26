@@ -1925,7 +1925,6 @@ async def verify_closing(payload: dict):
 
         prev_status = (before_fields.get("Verified Status") or "").strip()
         prev_food_deducted = float(before_fields.get("Food Cost Deducted", 0) or 0)
-        prev_was_budget_deducted = bool(before_fields.get("Weekly Budget Deducted"))
 
         # -------------------------------------------------------
         # 1) Base fields that always update
@@ -2018,7 +2017,7 @@ async def verify_closing(payload: dict):
         if status == "Verified":
             try:
                 # 🔒 Idempotency guard
-                if was_budget_deducted:
+                if prev_food_deducted > 0:
                     print("Skipping weekly budget deduction — already deducted")
                 else:
                     budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
@@ -2039,14 +2038,14 @@ async def verify_closing(payload: dict):
                             },
                         )
 
-                        # Anchor idempotency on the closing (DAILY CLOSING TABLE)
+                        # ✅ Anchor idempotency on DAILY CLOSING
                         table.update(
                             record_id,
                             {
                                 "Food Cost Deducted": new_food_spend,
-                                "Weekly Budget Deducted": True,
                             },
                         )
+
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
 
@@ -2055,7 +2054,7 @@ async def verify_closing(payload: dict):
         # =========================
         else:
             # Reversal must use BEFORE snapshot
-            if prev_status == "Verified" and prev_food_deducted > 0 and prev_was_budget_deducted:
+            if prev_status == "Verified" and prev_food_deducted > 0:
                 try:
                     budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
                     if budget_record:
@@ -2078,7 +2077,6 @@ async def verify_closing(payload: dict):
                         record_id,
                         {
                             "Food Cost Deducted": 0,
-                            "Weekly Budget Deducted": False,
                         }
                     )
                 except Exception as budget_err:
