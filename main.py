@@ -1,6 +1,7 @@
 import os
 import json
 from datetime import date as dt_date, datetime
+from datetime import timedelta
 from typing import Optional, List, Dict
 from collections import defaultdict
 
@@ -11,7 +12,6 @@ from pydantic import BaseModel, Field, RootModel
 from dotenv import load_dotenv
 from pyairtable import Table
 from fastapi import Query
-from datetime import date as dt_date
 
 from email_service import (
     send_closing_submission_email,
@@ -110,6 +110,17 @@ def _airtable_table(table_key: str) -> Table:
 
     return Table(AIRTABLE_API_KEY, AIRTABLE_BASE_ID, table_id)
 
+def parse_airtable_date(value: str) -> dt_date:
+    """
+    Airtable Date fields often include time + timezone (Z).
+    This safely normalizes them to a pure date.
+    """
+    if not value:
+        raise ValueError("Missing Airtable date value")
+
+    return datetime.fromisoformat(
+        value.replace("Z", "")
+    ).date()
 
 # -----------------------------------------------------------
 # TABLE KEYS (single source of truth)
@@ -143,8 +154,6 @@ def normalize_store_value(store: Optional[str]) -> str:
         .replace("‘", "")
         .replace("'", "")
     )
-
-from datetime import timedelta
 
 def monday_of_week(d: dt_date) -> dt_date:
     return d - timedelta(days=d.weekday())
@@ -1912,16 +1921,23 @@ async def verify_closing(payload: dict):
                 return None, None, None
 
             store_id = store_ids[0]  # Airtable record ID
-            business_date = dt_date.fromisoformat(business_date_str)
+
+            # ✅ SAFE date parsing (fixes week shift bug)
+            business_date = parse_airtable_date(business_date_str)
             week_start = monday_of_week(business_date).isoformat()
 
-            budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+            # ✅ Resolve Weekly Budgets table safely
+            budget_table = _airtable_table("weekly_budgets")
+            if not budget_table:
+                print("⚠️ Weekly Budgets table not configured")
+                return None, None, week_start
 
+            # ✅ Correct Airtable formula for linked records
             formula = (
                 "AND("
-                f"FIND('{store_id}', {{Store}}),"
+                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
-                "{Status}='Locked'"
+                "{{Status}}='Locked'"
                 ")"
             )
 
@@ -1931,7 +1947,9 @@ async def verify_closing(payload: dict):
             print("Formula:", formula)
 
             records = budget_table.all(formula=formula, max_records=1)
+
             if not records:
+                print("⚠️ No locked weekly budget record found")
                 return budget_table, None, week_start
 
             return budget_table, records[0], week_start
