@@ -392,7 +392,7 @@ def get_weekly_budget_raw(
 
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN(RECORD_ID({{Store}})),"
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -490,7 +490,7 @@ async def get_weekly_budget(
 
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN(RECORD_ID({{Store}})),"
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -1730,8 +1730,8 @@ async def get_closing_needs_update(store_id: str):
         # Linked-record-safe formula
         formula = (
             "AND("
-            "FIND('{sid}', ARRAYJOIN(RECORD_ID({{Store}})),"
-            "{Verified Status}='Needs Update'"
+            "FIND('{sid}', ARRAYJOIN({{Store}})),"
+            "{{Verified Status}}='Needs Update'"
             ")"
         ).format(sid=store_id)
 
@@ -1981,7 +1981,7 @@ async def verify_closing(payload: dict):
             safe_store_name = store_name.replace("'", "\\'")
             formula = (
                 "AND("
-                f"FIND('{safe_store_name}', ARRAYJOIN(RECORD_ID({{Store}})),"
+                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
                 f"{{Week Start}}='{week_start}',"
                 "{Status}='Locked'"
                 ")"
