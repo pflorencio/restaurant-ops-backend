@@ -1731,9 +1731,14 @@ async def get_closing_needs_update(store_id: str):
         formula = (
             "AND("
             "FIND('{sid}', ARRAYJOIN({{Store}})),"
-            "{{Verified Status}}='Needs Update'"
+            "{{Week Start}}='{week_start}',"
+            "{{Status}}='Locked'"
             ")"
-        ).format(sid=store_id)
+        ).format(
+            sid=store_id,
+            week_start=week_start,
+        )
+        print("FINAL Airtable formula →", formula)
 
         records = table.all(
             formula=formula,
