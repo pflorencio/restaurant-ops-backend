@@ -1921,7 +1921,7 @@ async def verify_closing(payload: dict):
                 "AND("
                 f"FIND('{store_id}', {{Store}}),"
                 f"{{Week Start}}='{week_start}',"
-                "{{Status}}='Locked'"
+                "{Status}='Locked'"
                 ")"
             )
 
