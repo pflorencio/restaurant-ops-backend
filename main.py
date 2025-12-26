@@ -1982,7 +1982,7 @@ async def verify_closing(payload: dict):
                 "AND("
                 f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
-                "{{Status}}='Locked'"
+                "{Status}='Locked'"
                 ")"
             )
 
