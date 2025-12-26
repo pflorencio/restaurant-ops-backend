@@ -2002,89 +2002,81 @@ async def verify_closing(payload: dict):
             return budget_table, records[0], week_start
 
         # ---------------------------------------------------
-        # 4) Weekly budget adjustment logic
+        # 4) Weekly budget adjustment logic (SAFE + REVERSIBLE)
         # ---------------------------------------------------
+
         fresh = table.get(record_id)
         fields = fresh.get("fields", {}) if fresh else {}
 
-        # IMPORTANT:
-        # Use the FRESH flag for idempotency (most accurate source of truth)
-        was_budget_deducted = bool(fields.get("Weekly Budget Deducted"))
+        current_food_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
 
         # =========================
-        # WEEKLY BUDGET ADJUSTMENT
+        # VERIFYING → DEDUCT ONCE
         # =========================
         if status == "Verified":
             try:
-                # 🔒 Idempotency guard
-                if was_budget_deducted:
+                if current_food_deducted > 0:
                     print("Skipping weekly budget deduction — already deducted")
                 else:
                     budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
                     if budget_record:
                         remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                        prev_running_deducted = float(
+                        running_deducted = float(
                             budget_record["fields"].get("Food Cost Deducted", 0) or 0
                         )
 
-                        food_spend = float(food_spend_from_fields(fields) or 0)
+                        new_food_spend = float(food_spend_from_fields(fields) or 0)
 
                         budget_table.update(
                             budget_record["id"],
                             {
-                                "Remaining Budget": max(0, remaining - food_spend),
-                                "Food Cost Deducted": prev_running_deducted + food_spend,
+                                "Remaining Budget": remaining - new_food_spend,
+                                "Food Cost Deducted": running_deducted + new_food_spend,
                                 "Last Updated At": now_iso,
                             },
                         )
 
-                        # ✅ Anchor on closing
+                        # Anchor deduction on DAILY CLOSING
                         table.update(
                             record_id,
                             {
-                                "Food Cost Deducted": food_spend,
-                                "Weekly Budget Deducted": True,
+                                "Food Cost Deducted": new_food_spend,
                             },
                         )
-
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
 
-
         # =========================
-        # UN-VERIFY (REVERSAL)
+        # UN-VERIFYING → REVERSE
         # =========================
-        elif prev_status == "Verified" and was_budget_deducted:
-            try:
-                budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
-                if budget_record:
-                    remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                    prev_running_deducted = float(
-                        budget_record["fields"].get("Food Cost Deducted", 0) or 0
-                    )
+        else:
+            if prev_status == "Verified" and current_food_deducted > 0:
+                try:
+                    budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
+                    if budget_record:
+                        remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
+                        running_deducted = float(
+                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        )
 
-                    budget_table.update(
-                        budget_record["id"],
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Remaining Budget": remaining + current_food_deducted,
+                                "Food Cost Deducted": max(0, running_deducted - current_food_deducted),
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                    # Clear anchor
+                    table.update(
+                        record_id,
                         {
-                            "Remaining Budget": remaining + prev_food_deducted,
-                            "Food Cost Deducted": max(
-                                0, prev_running_deducted - prev_food_deducted
-                            ),
-                            "Last Updated At": now_iso,
-                        },
+                            "Food Cost Deducted": 0,
+                        }
                     )
-
-                # 🔄 Reset anchors
-                table.update(
-                    record_id,
-                    {
-                        "Food Cost Deducted": 0,
-                        "Weekly Budget Deducted": False,
-                    },
-                )
-
-            except Exception as budget_err:
-                print("Weekly budget reversal error:", budget_err)
+                except Exception as budget_err:
+                    print("Weekly budget reversal error:", budget_err)
 
         # ---------------------------------------------------
         # 5) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
