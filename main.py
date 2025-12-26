@@ -164,6 +164,29 @@ def food_spend_from_fields(fields: dict) -> float:
         + float(fields.get("Bar Budget", 0) or 0)
     )
 
+def resolve_store_display_name(store_id: str) -> str:
+    """
+    Resolve Airtable Stores record ID -> display name used in linked record fields.
+    We treat the Stores table primary display as the `Store` field (fallbacks included).
+    """
+    if not store_id:
+        return ""
+
+    try:
+        stores_table = _airtable_table(STORES_TABLE)
+        rec = stores_table.get(store_id) or {}
+        f = rec.get("fields", {}) or {}
+        # ✅ Your codebase consistently uses "Store" as the store name field
+        return (
+            f.get("Store")
+            or f.get("Store Name")
+            or f.get("Name")
+            or ""
+        )
+    except Exception as e:
+        print("⚠️ resolve_store_display_name failed:", e)
+        return ""
+
 # -----------------------------------------------------------
 # 🧠 Shared User Validation Logic
 # -----------------------------------------------------------
@@ -378,21 +401,17 @@ def get_weekly_budget_raw(
 ):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-    # Resolve store display name from Stores table
-    stores_table = _airtable_table(STORES_TABLE)
-    store_rec = stores_table.get(store_id)
-    store_name = (
-        store_rec.get("fields", {}).get("Name")
-        or store_rec.get("fields", {}).get("Store Name")
-        or ""
-    )
+    store_name = resolve_store_display_name(store_id)
+    if not store_name:
+        return {"status": "missing", "reason": "Could not resolve store name"}
 
     week_start = monday_of_week(dt_date.fromisoformat(business_date)).isoformat()
     safe_store_name = store_name.replace("'", "\\'")
 
+    # ✅ Correct Airtable formula (linked Store field -> ARRAYJOIN returns display values)
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -408,6 +427,7 @@ def get_weekly_budget_raw(
         "fields": r["fields"],
     }
 
+
 @app.post("/weekly-budgets/lock")
 def lock_weekly_budget(payload: dict):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
@@ -415,33 +435,34 @@ def lock_weekly_budget(payload: dict):
     budget_id = payload["budget_id"]
     weekly_budget = float(payload["weekly_budget"])
     locked_by = payload.get("locked_by", "System")
-    store_id = payload["store_id"]
-    week_start = payload["week_start"]
 
-    # Resolve store display name from Stores table
-    stores_table = _airtable_table(STORES_TABLE)
-    store_rec = stores_table.get(store_id)
-    store_name = (
-        store_rec.get("fields", {}).get("Name")
-        or store_rec.get("fields", {}).get("Store Name")
-        or ""
-    )
+    store_id = payload["store_id"]
+    week_start = payload["week_start"]  # expected YYYY-MM-DD (Monday)
+
+    store_name = resolve_store_display_name(store_id)
+    if not store_name:
+        raise HTTPException(status_code=400, detail="Could not resolve store name")
 
     safe_store_name = store_name.replace("'", "\\'")
 
-    # Recalculate remaining based on VERIFIED closings
+    # Recalculate remaining based on VERIFIED closings in that week (Mon..Sun)
     closings = _airtable_table(DAILY_CLOSINGS_TABLE)
 
+    ws = dt_date.fromisoformat(week_start)
+    we = (ws + timedelta(days=6)).isoformat()
+
+    # Airtable doesn't have IS_SAME_OR_AFTER; use IS_AFTER/IS_BEFORE with DATEADD window
     formula = (
         "AND("
         "{Verified Status}='Verified',"
-        f"IS_SAME_OR_AFTER({{Date}}, '{week_start}'),"
+        f"IS_AFTER({{Date}}, DATEADD(DATETIME_PARSE('{week_start}','YYYY-MM-DD'), -1, 'days')),"
+        f"IS_BEFORE({{Date}}, DATEADD(DATETIME_PARSE('{we}','YYYY-MM-DD'), 1, 'days')),"
         f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}))"
         ")"
     )
 
     records = closings.all(formula=formula)
-    spent = sum(food_spend_from_fields(r["fields"]) for r in records)
+    spent = sum(food_spend_from_fields(r.get("fields", {}) or {}) for r in records)
 
     updates = {
         "Weekly Budget Amount": weekly_budget,
@@ -453,6 +474,7 @@ def lock_weekly_budget(payload: dict):
 
     table.update(budget_id, updates)
     return {"status": "locked"}
+
 
 # -----------------------------------------------------------
 # 📊 Weekly Budget – Read (Frontend)
@@ -466,7 +488,6 @@ async def get_weekly_budget(
     Returns weekly budget context for a store + date.
     Week starts on Monday.
     """
-
     try:
         business_date = dt_date.fromisoformat(date)
     except Exception:
@@ -477,20 +498,15 @@ async def get_weekly_budget(
 
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-    # Resolve store display name from Stores table
-    stores_table = _airtable_table(STORES_TABLE)
-    store_rec = stores_table.get(store_id)
-    store_name = (
-        store_rec.get("fields", {}).get("Name")
-        or store_rec.get("fields", {}).get("Store Name")
-        or ""
-    )
+    store_name = resolve_store_display_name(store_id)
+    if not store_name:
+        return {"exists": False, "reason": "Could not resolve store name"}
 
     safe_store_name = store_name.replace("'", "\\'")
 
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -500,7 +516,7 @@ async def get_weekly_budget(
         return {"exists": False}
 
     record = records[0]
-    fields = record.get("fields", {})
+    fields = record.get("fields", {}) or {}
 
     weekly_budget = float(fields.get("Weekly Budget Amount", 0) or 0)
     remaining_budget = float(fields.get("Remaining Budget", 0) or 0)
@@ -1721,49 +1737,41 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
 @app.get("/closings/needs-update")
 async def get_closing_needs_update(store_id: str):
     """
-    Returns the most recent closing marked as 'Needs Update'
-    for the given store.
+    Returns the most recent closing marked as 'Needs Update' for the given store.
     """
     try:
         table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-        # Linked-record-safe formula
+        store_name = resolve_store_display_name(store_id)
+        if not store_name:
+            raise HTTPException(status_code=400, detail="Could not resolve store name")
+
+        safe_store_name = store_name.replace("'", "\\'")
+
         formula = (
             "AND("
-            "FIND('{sid}', ARRAYJOIN({{Store}})),"
-            "{{Week Start}}='{week_start}',"
-            "{{Status}}='Locked'"
+            "{Verified Status}='Needs Update',"
+            f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}))"
             ")"
-        ).format(
-            sid=store_id,
-            week_start=week_start,
-        )
-        print("FINAL Airtable formula →", formula)
-
-        records = table.all(
-            formula=formula,
-            max_records=1,
-            sort=["-Date"],
         )
 
+        records = table.all(formula=formula, max_records=1, sort=["-Date"])
         if not records:
             return {"exists": False}
 
         r = records[0]
-        f = r.get("fields", {})
+        f = r.get("fields", {}) or {}
 
         return {
             "exists": True,
             "record_id": r.get("id"),
             "business_date": f.get("Date"),
-            "store_name": (
-                f.get("Store Name")
-                or f.get("Store Display")
-                or f.get("Store Normalized")
-            ),
+            "store_name": store_name,
             "notes": (f.get("Verification Notes") or "").strip(),
         }
 
+    except HTTPException:
+        raise
     except Exception as e:
         print("❌ needs-update error:", str(e))
         raise HTTPException(status_code=500, detail="Failed to check updates")
@@ -1788,21 +1796,18 @@ async def get_closings_needing_update(store_id: str):
         store_record = stores_table.get(store_id)
         store_fields = store_record.get("fields", {}) if store_record else {}
 
-        store_name = store_fields.get("Store")
-
+        store_name = resolve_store_display_name(store_id)
         if not store_name:
-            raise HTTPException(
-                status_code=400,
-                detail="Could not resolve store name from Stores table"
-            )
+            raise HTTPException(status_code=400, detail="Could not resolve store name")
 
-        # 2) Filter Daily Closings
+        safe_store_name = store_name.replace("'", "\\'")
+
         formula = (
             "AND("
             "{Verified Status}='Needs Update',"
-            "FIND('{store}', ARRAYJOIN({{Store}}))"
+            f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}))"
             ")"
-        ).format(store=str(store_name).replace("'", "\\'"))
+        )
 
         records = closings_table.all(
             formula=formula,
@@ -1957,20 +1962,11 @@ async def verify_closing(payload: dict):
             if not store_ids or not business_date_raw:
                 return None, None, None
 
-            store_id = store_ids[0]  # Airtable record id (recXXXX)
+            store_id = store_ids[0]  # recXXXX
 
-            # ✅ Resolve store DISPLAY NAME from Stores table
-            store_name = None
-            try:
-                stores_table = _airtable_table(STORES_TABLE)
-                store_rec = stores_table.get(store_id)
-                store_name = (store_rec.get("fields", {}) or {}).get("Name") or (store_rec.get("fields", {}) or {}).get("Store Name")
-            except Exception as e:
-                print("⚠️ Could not resolve linked store name from Stores table:", e)
-
-            # Fallback (still let it run, but it may not match anything)
+            store_name = resolve_store_display_name(store_id)
             if not store_name:
-                store_name = str(store_id)
+                store_name = str(store_id)  # fallback (won’t match weekly budgets, but avoids crash)
 
             # Robust date parsing
             try:
@@ -1981,14 +1977,12 @@ async def verify_closing(payload: dict):
             week_start = monday_of_week(business_date).isoformat()
             budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-            # ✅ Linked-record-safe lookup: match by STORE DISPLAY VALUE
-            # ARRAYJOIN({Store}) yields "Nonie's" etc.
             safe_store_name = store_name.replace("'", "\\'")
             formula = (
                 "AND("
-                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}),"
+                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
                 f"{{Week Start}}='{week_start}',"
-                "{Status}='Locked'"
+                "{{Status}}='Locked'"
                 ")"
             )
 
