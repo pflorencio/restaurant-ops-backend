@@ -444,6 +444,13 @@ def upsert_weekly_budget(payload: dict):
         raise HTTPException(400, "store_id and week_start are required")
 
     # -------------------------------
+    # Resolve store name (DISPLAY)
+    # -------------------------------
+    store_name = resolve_store_display_name(store_id)
+    if not store_name:
+        raise HTTPException(400, "Could not resolve store name")
+
+    # -------------------------------
     # Validate week_start is Monday
     # -------------------------------
     ws = dt_date.fromisoformat(week_start)
@@ -459,13 +466,11 @@ def upsert_weekly_budget(payload: dict):
     total_budget = kitchen_budget + bar_budget
 
     # -------------------------------
-    # Look for existing budget (SAFE MATCH)
-    # Match by Store RECORD ID + Week Start
+    # Lookup existing budget (CORRECT)
     # -------------------------------
     formula = (
         "AND("
-        f"RECORD_ID() != '',"
-        f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+        f"{{Store (from Store)}}='{store_name}',"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -519,7 +524,7 @@ def upsert_weekly_budget(payload: dict):
         "Bar Weekly Budget": bar_budget,
         "Weekly Budget Amount": total_budget,
 
-        # Preserve prior deductions
+        # Preserve deductions
         "Remaining Budget": max(0, total_budget - already_deducted),
 
         "Last Updated At": datetime.utcnow().isoformat(),
