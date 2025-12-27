@@ -444,22 +444,9 @@ def upsert_weekly_budget(payload: dict):
         raise HTTPException(400, "store_id and week_start are required")
 
     # -------------------------------
-    # Resolve store name
-    # -------------------------------
-    store_name = resolve_store_display_name(store_id)
-    if not store_name:
-        raise HTTPException(400, "Could not resolve store name")
-
-    safe_store_name = store_name.replace("'", "\\'")
-
-    # -------------------------------
     # Validate week_start is Monday
     # -------------------------------
-    try:
-        ws = dt_date.fromisoformat(week_start)
-    except Exception:
-        raise HTTPException(400, "Invalid week_start format")
-
+    ws = dt_date.fromisoformat(week_start)
     if ws.weekday() != 0:
         raise HTTPException(400, "week_start must be a Monday")
 
@@ -472,11 +459,13 @@ def upsert_weekly_budget(payload: dict):
     total_budget = kitchen_budget + bar_budget
 
     # -------------------------------
-    # Look for existing weekly budget
+    # Look for existing budget (SAFE MATCH)
+    # Match by Store RECORD ID + Week Start
     # -------------------------------
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
+        f"RECORD_ID() != '',"
+        f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -484,9 +473,9 @@ def upsert_weekly_budget(payload: dict):
     existing = table.all(formula=formula, max_records=1)
     record = existing[0] if existing else None
 
-    # =========================================================
-    # CREATE NEW (first time for this store + week)
-    # =========================================================
+    # -------------------------------
+    # Create NEW draft
+    # -------------------------------
     if not record:
         fields = {
             "Store": [store_id],
@@ -512,16 +501,14 @@ def upsert_weekly_budget(payload: dict):
             "weekly_budget": total_budget,
             "kitchen_budget": kitchen_budget,
             "bar_budget": bar_budget,
-            "remaining_budget": total_budget,
         }
 
-    # =========================================================
-    # UPDATE EXISTING (same store + same week)
-    # =========================================================
+    # -------------------------------
+    # Update EXISTING draft
+    # -------------------------------
     record_id = record["id"]
     fields = record.get("fields", {}) or {}
 
-    # 🔒 Block edits if locked
     if fields.get("Status") == "Locked":
         raise HTTPException(403, "Weekly budget is locked and cannot be edited")
 
@@ -532,7 +519,7 @@ def upsert_weekly_budget(payload: dict):
         "Bar Weekly Budget": bar_budget,
         "Weekly Budget Amount": total_budget,
 
-        # Preserve deductions already made
+        # Preserve prior deductions
         "Remaining Budget": max(0, total_budget - already_deducted),
 
         "Last Updated At": datetime.utcnow().isoformat(),
