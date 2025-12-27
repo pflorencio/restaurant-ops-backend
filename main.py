@@ -1216,7 +1216,18 @@ def upsert_closing(payload: ClosingCreate):
             rec_id = existing["id"]
             lock_status = existing["fields"].get("Lock Status", "Unlocked")
 
-            if lock_status in ["Locked", "Verified"]:
+            # 🔄 Resubmission after Needs Update → reset verification state
+            prev_verified_status = existing["fields"].get("Verified Status")
+
+            if prev_verified_status == "Needs Update":
+                fields.update({
+                    "Verified Status": "Pending",
+                    "Verified At": None,
+                    "Food Cost Deducted": 0,  # reset so /verify recalculates delta cleanly
+                })
+
+            # 🔓 Allow edit if coming from Needs Update
+            if lock_status in ["Locked", "Verified"] and prev_verified_status != "Needs Update":
                 raise HTTPException(
                     403, f"Record for {store_name} on {business_date} is locked."
                 )
@@ -2011,38 +2022,48 @@ async def verify_closing(payload: dict):
         current_food_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
 
         # =========================
-        # VERIFYING → DEDUCT ONCE
+        # VERIFYING
         # =========================
         if status == "Verified":
             try:
-                if current_food_deducted > 0:
-                    print("Skipping weekly budget deduction — already deducted")
-                else:
-                    budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
-                    if budget_record:
-                        remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                        running_deducted = float(
-                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
-                        )
+                budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
 
-                        new_food_spend = float(food_spend_from_fields(fields) or 0)
+                if not budget_record:
+                    return
 
-                        budget_table.update(
-                            budget_record["id"],
-                            {
-                                "Remaining Budget": remaining - new_food_spend,
-                                "Food Cost Deducted": running_deducted + new_food_spend,
-                                "Last Updated At": now_iso,
-                            },
-                        )
+                new_food_spend = float(food_spend_from_fields(fields) or 0)
+                prev_food_spend = float(prev_food_deducted or 0)
 
-                        # Anchor deduction on DAILY CLOSING
-                        table.update(
-                            record_id,
-                            {
-                                "Food Cost Deducted": new_food_spend,
-                            },
-                        )
+                delta = new_food_spend - prev_food_spend
+
+                # Nothing changed → do nothing
+                if delta == 0:
+                    print("No food cost change — skipping weekly budget adjustment")
+                    return
+
+                remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
+                running_deducted = float(budget_record["fields"].get("Food Cost Deducted", 0) or 0)
+
+                # Apply delta (can be + or -)
+                budget_table.update(
+                    budget_record["id"],
+                    {
+                        "Remaining Budget": remaining - delta,
+                        "Food Cost Deducted": running_deducted + delta,
+                        "Last Updated At": now_iso,
+                    },
+                )
+
+                # Anchor final value on DAILY CLOSING
+                table.update(
+                    record_id,
+                    {
+                        "Food Cost Deducted": new_food_spend,
+                    },
+                )
+
+                print(f"Weekly budget reconciled by delta: {delta}")
+
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
 
