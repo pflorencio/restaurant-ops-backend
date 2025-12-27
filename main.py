@@ -427,6 +427,121 @@ def get_weekly_budget_raw(
         "fields": r["fields"],
     }
 
+# -----------------------------------------------------------
+# 🧾 Weekly Budget – Create / Update (Draft)
+# -----------------------------------------------------------
+@app.post("/weekly-budgets")
+def upsert_weekly_budget(payload: dict):
+    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+
+    store_id = payload.get("store_id")
+    week_start = payload.get("week_start")  # YYYY-MM-DD (Monday)
+    kitchen_budget = float(payload.get("kitchen_budget", 0) or 0)
+    bar_budget = float(payload.get("bar_budget", 0) or 0)
+    submitted_by = payload.get("submitted_by", "System")
+
+    if not store_id or not week_start:
+        raise HTTPException(400, "store_id and week_start are required")
+
+    # -------------------------------
+    # Resolve store name
+    # -------------------------------
+    store_name = resolve_store_display_name(store_id)
+    if not store_name:
+        raise HTTPException(400, "Could not resolve store name")
+
+    safe_store_name = store_name.replace("'", "\\'")
+
+    # -------------------------------
+    # Validate week_start is Monday
+    # -------------------------------
+    ws = dt_date.fromisoformat(week_start)
+    if ws.weekday() != 0:
+        raise HTTPException(400, "week_start must be a Monday")
+
+    week_end = (ws + timedelta(days=6)).isoformat()
+
+    # ❌ Prevent edits to past weeks
+    if ws < monday_of_week(dt_date.today()):
+        raise HTTPException(403, "Cannot edit budgets for past weeks")
+
+    # -------------------------------
+    # Look for existing budget
+    # -------------------------------
+    formula = (
+        "AND("
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
+        f"{{Week Start}}='{week_start}'"
+        ")"
+    )
+
+    existing = table.all(formula=formula, max_records=1)
+    record = existing[0] if existing else None
+
+    total_budget = kitchen_budget + bar_budget
+
+    # -------------------------------
+    # Create NEW draft
+    # -------------------------------
+    if not record:
+        fields = {
+            "Store": [store_id],
+            "Week Start": week_start,
+            "Week End": week_end,
+
+            "Kitchen Weekly Budget": kitchen_budget,
+            "Bar Weekly Budget": bar_budget,
+            "Weekly Budget Amount": total_budget,
+
+            "Food Cost Deducted": 0,
+            "Remaining Budget": total_budget,
+
+            "Status": "Draft",
+            "Last Updated At": datetime.utcnow().isoformat(),
+        }
+
+        created = table.create(fields)
+
+        return {
+            "status": "created",
+            "id": created["id"],
+            "weekly_budget": total_budget,
+            "kitchen_budget": kitchen_budget,
+            "bar_budget": bar_budget,
+        }
+
+    # -------------------------------
+    # Update EXISTING draft
+    # -------------------------------
+    record_id = record["id"]
+    fields = record.get("fields", {}) or {}
+
+    if fields.get("Status") == "Locked":
+        raise HTTPException(403, "Weekly budget is locked and cannot be edited")
+
+    already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
+
+    updates = {
+        "Kitchen Weekly Budget": kitchen_budget,
+        "Bar Weekly Budget": bar_budget,
+        "Weekly Budget Amount": total_budget,
+
+        # Preserve deductions
+        "Remaining Budget": max(0, total_budget - already_deducted),
+
+        "Last Updated At": datetime.utcnow().isoformat(),
+    }
+
+    table.update(record_id, updates)
+
+    return {
+        "status": "updated",
+        "id": record_id,
+        "weekly_budget": total_budget,
+        "kitchen_budget": kitchen_budget,
+        "bar_budget": bar_budget,
+        "remaining_budget": max(0, total_budget - already_deducted),
+    }
 
 @app.post("/weekly-budgets/lock")
 def lock_weekly_budget(payload: dict):
