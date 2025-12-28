@@ -392,33 +392,70 @@ async def list_stores():
     return stores
 
 # -----------------------------------------------------------
-# WEEKLY BUDGETS
+# WEEKLY BUDGETS (GET)
 # -----------------------------------------------------------
 @app.get("/weekly-budgets")
 def get_weekly_budget_raw(store_id: str, business_date: str):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-    week_start = monday_of_week(
-        dt_date.fromisoformat(business_date)
-    ).isoformat()
+    # Normalize any date to Monday of that week
+    week_start = monday_of_week(dt_date.fromisoformat(business_date)).isoformat()
 
-    formula = (
+    # ✅ PRIMARY: match by Store ID + Week Start using IS_SAME (date-safe)
+    formula_primary = (
         "AND("
         f"{{Store ID}}='{store_id}',"
         f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
         ")"
     )
 
-    records = table.all(formula=formula, max_records=1)
+    records = table.all(formula=formula_primary, max_records=1)
+
+    # ✅ FALLBACK (only if needed): match by Store display name (linked record)
+    if not records:
+        store_name = resolve_store_display_name(store_id)
+        if store_name:
+            safe_store_name = store_name.replace("'", "\\'")
+            formula_fallback = (
+                "AND("
+                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
+                f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
+                ")"
+            )
+            records = table.all(formula=formula_fallback, max_records=1)
 
     if not records:
-        return {"status": "empty"}
+        # Helpful debug fields (won't break anything)
+        return {
+            "status": "empty",
+            "store_id": store_id,
+            "week_start": week_start,
+            "business_date": business_date,
+        }
 
     r = records[0]
+    fields = r.get("fields", {}) or {}
+
+    # ✅ Return BOTH:
+    # - "fields" (for the cashier form context UI)
+    # - flat keys (for your admin weekly budget page which expects them)
     return {
         "status": "found",
         "id": r["id"],
-        "fields": r["fields"],
+        "fields": fields,
+
+        # Backward-compatible flattened keys
+        "week_start": fields.get("Week Start"),
+        "week_end": fields.get("Week End"),
+        "weekly_budget": fields.get("Weekly Budget Amount"),
+        "kitchen_budget": fields.get("Kitchen Weekly Budget"),
+        "bar_budget": fields.get("Bar Weekly Budget"),
+        "remaining_budget": fields.get("Remaining Budget"),
+        "food_cost_deducted": fields.get("Food Cost Deducted"),
+        "locked_by": fields.get("Locked By"),
+        "locked_at": fields.get("Locked At"),
+        "last_updated_at": fields.get("Last Updated At"),
+        "status_text": fields.get("Status"),
     }
 
 # -----------------------------------------------------------
