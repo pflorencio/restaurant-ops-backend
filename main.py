@@ -443,16 +443,6 @@ def upsert_weekly_budget(payload: dict):
     if not store_id or not week_start:
         raise HTTPException(400, "store_id and week_start are required")
 
-    # -------------------------------
-    # Resolve store name (DISPLAY)
-    # -------------------------------
-    store_name = resolve_store_display_name(store_id)
-    if not store_name:
-        raise HTTPException(400, "Could not resolve store name")
-
-    # -------------------------------
-    # Validate week_start is Monday
-    # -------------------------------
     ws = dt_date.fromisoformat(week_start)
     if ws.weekday() != 0:
         raise HTTPException(400, "week_start must be a Monday")
@@ -463,16 +453,12 @@ def upsert_weekly_budget(payload: dict):
     if ws < monday_of_week(dt_date.today()):
         raise HTTPException(403, "Cannot edit budgets for past weeks")
 
-    total_budget = kitchen_budget + bar_budget
-
     # -------------------------------
-    # Look for existing budget
+    # Look for existing budget (SAFE)
     # -------------------------------
-    safe_store_name = store_name.replace("'", "\\'")
-
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store (from Store)}})),"
+        f"{{Store ID}}='{store_id}',"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
@@ -480,12 +466,16 @@ def upsert_weekly_budget(payload: dict):
     existing = table.all(formula=formula, max_records=1)
     record = existing[0] if existing else None
 
+    total_budget = kitchen_budget + bar_budget
+
     # -------------------------------
-    # Create NEW draft
+    # CREATE
     # -------------------------------
     if not record:
         fields = {
             "Store": [store_id],
+            "Store ID": store_id,
+
             "Week Start": week_start,
             "Week End": week_end,
 
@@ -511,7 +501,7 @@ def upsert_weekly_budget(payload: dict):
         }
 
     # -------------------------------
-    # Update EXISTING draft
+    # UPDATE
     # -------------------------------
     record_id = record["id"]
     fields = record.get("fields", {}) or {}
@@ -525,10 +515,7 @@ def upsert_weekly_budget(payload: dict):
         "Kitchen Weekly Budget": kitchen_budget,
         "Bar Weekly Budget": bar_budget,
         "Weekly Budget Amount": total_budget,
-
-        # Preserve deductions
         "Remaining Budget": max(0, total_budget - already_deducted),
-
         "Last Updated At": datetime.utcnow().isoformat(),
     }
 
