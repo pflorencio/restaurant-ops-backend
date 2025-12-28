@@ -551,53 +551,183 @@ def upsert_weekly_budget(payload: dict):
         "remaining_budget": max(0, total_budget - already_deducted),
     }
 
+# -----------------------------------------------------------
+# 🔒 Weekly Budget – Lock (finalize + recalc from verified closings)
+# -----------------------------------------------------------
 @app.post("/weekly-budgets/lock")
 def lock_weekly_budget(payload: dict):
-    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+    budgets_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+    closings_table = _airtable_table(DAILY_CLOSINGS_TABLE)
 
-    budget_id = payload["budget_id"]
-    weekly_budget = float(payload["weekly_budget"])
-    locked_by = payload.get("locked_by", "System")
+    # Inputs (support both styles: lock by budget_id OR lock by store_id+week_start)
+    budget_id = payload.get("budget_id")
+    store_id = payload.get("store_id")
+    week_start = payload.get("week_start")  # expected YYYY-MM-DD (Monday)
+    locked_by = payload.get("locked_by") or payload.get("submitted_by") or payload.get("updated_by") or "System"
 
-    store_id = payload["store_id"]
-    week_start = payload["week_start"]  # expected YYYY-MM-DD (Monday)
+    if not week_start:
+        raise HTTPException(400, "week_start is required")
+    if not budget_id and not store_id:
+        raise HTTPException(400, "Either budget_id OR store_id must be provided")
 
-    store_name = resolve_store_display_name(store_id)
-    if not store_name:
-        raise HTTPException(status_code=400, detail="Could not resolve store name")
+    # Validate week_start is Monday
+    try:
+        ws = dt_date.fromisoformat(week_start)
+    except Exception:
+        raise HTTPException(400, "week_start must be YYYY-MM-DD")
 
-    safe_store_name = store_name.replace("'", "\\'")
+    if ws.weekday() != 0:
+        raise HTTPException(400, "week_start must be a Monday")
 
-    # Recalculate remaining based on VERIFIED closings in that week (Mon..Sun)
-    closings = _airtable_table(DAILY_CLOSINGS_TABLE)
-
-    ws = dt_date.fromisoformat(week_start)
     we = (ws + timedelta(days=6)).isoformat()
 
-    # Airtable doesn't have IS_SAME_OR_AFTER; use IS_AFTER/IS_BEFORE with DATEADD window
-    formula = (
+    # -------------------------------
+    # 1) Find the weekly budget record
+    # -------------------------------
+    record = None
+
+    if budget_id:
+        # Direct fetch
+        try:
+            record = budgets_table.get(budget_id)
+        except Exception:
+            raise HTTPException(404, "Weekly budget record not found (invalid budget_id)")
+    else:
+        # Lookup by Store ID + Week Start
+        formula = (
+            "AND("
+            f"{{Store ID}}='{store_id}',"
+            f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
+            ")"
+        )
+        found = budgets_table.all(formula=formula, max_records=1)
+        record = found[0] if found else None
+
+    if not record:
+        raise HTTPException(404, "Weekly budget record not found for this store + week_start")
+
+    record_id = record["id"]
+    fields = record.get("fields", {}) or {}
+
+    # If already locked, return safely (idempotent)
+    if (fields.get("Status") or "").lower() == "locked":
+        return {
+            "status": "already_locked",
+            "id": record_id,
+            "week_start": week_start,
+            "week_end": we,
+            "weekly_budget": float(fields.get("Weekly Budget Amount", 0) or 0),
+            "remaining_budget": float(fields.get("Remaining Budget", 0) or 0),
+            "food_cost_deducted": float(fields.get("Food Cost Deducted", 0) or 0),
+        }
+
+    # -------------------------------
+    # 2) Determine the locked budget numbers
+    #    (Prefer record values; allow payload override if provided)
+    # -------------------------------
+    # We lock Kitchen/Bar/Total as of the lock action.
+    kitchen_budget = payload.get("kitchen_budget", fields.get("Kitchen Weekly Budget", 0)) or 0
+    bar_budget = payload.get("bar_budget", fields.get("Bar Weekly Budget", 0)) or 0
+
+    try:
+        kitchen_budget = float(kitchen_budget or 0)
+        bar_budget = float(bar_budget or 0)
+    except Exception:
+        raise HTTPException(400, "kitchen_budget and bar_budget must be numbers")
+
+    total_budget = kitchen_budget + bar_budget
+
+    # Backward compat: if someone still sends weekly_budget, we ignore mismatch and recompute from kitchen+bar
+    # weekly_budget_in = payload.get("weekly_budget", None)
+
+    # -------------------------------
+    # 3) Recalculate spent from VERIFIED closings within Mon..Sun
+    # -------------------------------
+    # Prefer matching via {Store ID} if present (more reliable than name matching).
+    # If your Daily Closings table does NOT have {Store ID}, add it (formula or text).
+    spent = 0.0
+
+    # Date window using IS_AFTER/IS_BEFORE with inclusive buffer
+    # (Airtable dates can be finicky; this is the safest inclusive pattern)
+    start_guard = f"DATEADD(DATETIME_PARSE('{week_start}','YYYY-MM-DD'), -1, 'days')"
+    end_guard = f"DATEADD(DATETIME_PARSE('{we}','YYYY-MM-DD'), 1, 'days')"
+
+    closings_formula_primary = (
         "AND("
         "{Verified Status}='Verified',"
-        f"IS_AFTER({{Date}}, DATEADD(DATETIME_PARSE('{week_start}','YYYY-MM-DD'), -1, 'days')),"
-        f"IS_BEFORE({{Date}}, DATEADD(DATETIME_PARSE('{we}','YYYY-MM-DD'), 1, 'days')),"
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}))"
+        f"IS_AFTER({{Date}}, {start_guard}),"
+        f"IS_BEFORE({{Date}}, {end_guard}),"
+        f"{{Store ID}}='{store_id}'"
         ")"
     )
 
-    records = closings.all(formula=formula)
-    spent = sum(food_spend_from_fields(r.get("fields", {}) or {}) for r in records)
+    try:
+        closing_records = closings_table.all(formula=closings_formula_primary)
+        spent = sum(food_spend_from_fields(r.get("fields", {}) or {}) for r in closing_records)
+    except Exception:
+        # Fallback: match via store DISPLAY NAME if Store ID isn't available / formula errors
+        store_name = resolve_store_display_name(store_id)
+        if not store_name:
+            raise HTTPException(400, "Could not resolve store name for fallback matching")
 
+        safe_store_name = store_name.replace("'", "\\'")
+        closings_formula_fallback = (
+            "AND("
+            "{Verified Status}='Verified',"
+            f"IS_AFTER({{Date}}, {start_guard}),"
+            f"IS_BEFORE({{Date}}, {end_guard}),"
+            f"FIND('{safe_store_name}', ARRAYJOIN({{Store}}))"
+            ")"
+        )
+        closing_records = closings_table.all(formula=closings_formula_fallback)
+        spent = sum(food_spend_from_fields(r.get("fields", {}) or {}) for r in closing_records)
+
+    remaining = max(0.0, total_budget - float(spent or 0))
+
+    # -------------------------------
+    # 4) Prepare updates (lock + finalize)
+    # -------------------------------
     updates = {
-        "Weekly Budget Amount": weekly_budget,
-        "Remaining Budget": weekly_budget - spent,
+        "Kitchen Weekly Budget": kitchen_budget,
+        "Bar Weekly Budget": bar_budget,
+        "Weekly Budget Amount": total_budget,
+        "Food Cost Deducted": float(spent or 0),
+        "Remaining Budget": remaining,
         "Status": "Locked",
         "Locked At": datetime.utcnow().isoformat(),
         "Locked By": locked_by,
+        "Last Updated At": datetime.utcnow().isoformat(),
     }
 
-    table.update(budget_id, updates)
-    return {"status": "locked"}
+    # Only set Original Weekly Budget Amount ONCE (first time we lock)
+    # IMPORTANT: make sure this field name matches your Airtable column exactly.
+    # Based on your screenshot it starts with "Original Weekly..."
+    original_field_name = "Original Weekly Budget Amount"
+    if original_field_name in fields:
+        if fields.get(original_field_name) in (None, "", 0):
+            updates[original_field_name] = total_budget
+    else:
+        # If your Airtable column name is slightly different, change it here.
+        # e.g. "Original Weekly Budget"
+        alt_original_field = "Original Weekly Budget"
+        if alt_original_field in fields and fields.get(alt_original_field) in (None, "", 0):
+            updates[alt_original_field] = total_budget
 
+    budgets_table.update(record_id, updates)
+
+    return {
+        "status": "locked",
+        "id": record_id,
+        "store_id": store_id,
+        "week_start": week_start,
+        "week_end": we,
+        "weekly_budget": total_budget,
+        "kitchen_budget": kitchen_budget,
+        "bar_budget": bar_budget,
+        "food_cost_deducted": float(spent or 0),
+        "remaining_budget": remaining,
+        "locked_by": locked_by,
+    }
 
 # -----------------------------------------------------------
 # 📊 Weekly Budget – Read (Frontend)
