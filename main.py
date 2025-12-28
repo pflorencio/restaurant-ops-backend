@@ -456,7 +456,7 @@ def upsert_weekly_budget(payload: dict):
     # ✅ CORRECT MATCH: linked Store record ID
     formula = (
         "AND("
-        f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+        f"{{Store ID}}='{store_id}',"
         f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
         ")"
     )
