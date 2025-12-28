@@ -761,6 +761,91 @@ def lock_weekly_budget(payload: dict):
     }
 
 # -----------------------------------------------------------
+# 📜 Weekly Budget History (Read-only)
+# -----------------------------------------------------------
+@app.get("/weekly-budgets/history")
+def get_weekly_budget_history(
+    store_id: str,
+    from_date: str,
+    to_date: str,
+):
+    table = _airtable_table(WEEKLY_BUDGETS_TABLE)
+
+    # -------------------------------
+    # Validate + normalize dates
+    # -------------------------------
+    try:
+        from_dt = dt_date.fromisoformat(from_date)
+        to_dt = dt_date.fromisoformat(to_date)
+    except Exception:
+        raise HTTPException(400, "from and to must be YYYY-MM-DD")
+
+    if from_dt > to_dt:
+        raise HTTPException(400, "from must be before to")
+
+    # Normalize to Mondays
+    from_week_start = monday_of_week(from_dt).isoformat()
+    to_week_start = monday_of_week(to_dt).isoformat()
+
+    # -------------------------------
+    # Airtable formula (SAFE VERSION)
+    # -------------------------------
+    # We use date guards because Airtable date comparisons
+    # are inconsistent with equality.
+    start_guard = f"DATEADD(DATETIME_PARSE('{from_week_start}','YYYY-MM-DD'), -1, 'days')"
+    end_guard = f"DATEADD(DATETIME_PARSE('{to_week_start}','YYYY-MM-DD'), 1, 'days')"
+
+    formula = (
+        "AND("
+        f"{{Store ID}}='{store_id}',"
+        "{Status}='Locked',"
+        f"IS_AFTER({{Week Start}}, {start_guard}),"
+        f"IS_BEFORE({{Week Start}}, {end_guard})"
+        ")"
+    )
+
+    records = table.all(formula=formula, sort=["Week Start"])
+
+    # -------------------------------
+    # Shape response (frontend-friendly)
+    # -------------------------------
+    results = []
+    for r in records:
+        f = r.get("fields", {}) or {}
+
+        original = float(
+            f.get("Original Weekly Budget Amount")
+            or f.get("Original Weekly Budget")
+            or 0
+        )
+        final_budget = float(f.get("Weekly Budget Amount", 0) or 0)
+        spent = float(f.get("Food Cost Deducted", 0) or 0)
+
+        results.append({
+            "id": r["id"],
+            "week_start": f.get("Week Start"),
+            "week_end": f.get("Week End"),
+
+            "original_weekly_budget": original,
+            "final_weekly_budget": final_budget,
+
+            "kitchen_budget": float(f.get("Kitchen Weekly Budget", 0) or 0),
+            "bar_budget": float(f.get("Bar Weekly Budget", 0) or 0),
+
+            "food_cost_deducted": spent,
+            "variance": final_budget - spent,
+
+            "locked_at": f.get("Locked At"),
+            "locked_by": f.get("Locked By"),
+        })
+
+    return {
+        "status": "ok",
+        "count": len(results),
+        "results": results,
+    }
+
+# -----------------------------------------------------------
 # 📊 Weekly Budget – Read (Frontend)
 # -----------------------------------------------------------
 @app.get("/weekly-budget")
