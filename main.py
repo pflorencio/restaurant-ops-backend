@@ -401,22 +401,18 @@ def get_weekly_budget_raw(
 ):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-    store_name = resolve_store_display_name(store_id)
-    if not store_name:
-        return {"status": "missing", "reason": "Could not resolve store name"}
-
+    # Normalize to Monday
     week_start = monday_of_week(dt_date.fromisoformat(business_date)).isoformat()
-    safe_store_name = store_name.replace("'", "\\'")
 
-    # ✅ Correct Airtable formula (linked Store field -> ARRAYJOIN returns display values)
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
-        f"{{Week Start}}='{week_start}'"
+        f"{{Store ID}}='{store_id}',"
+        f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
         ")"
     )
 
     records = table.all(formula=formula, max_records=1)
+
     if not records:
         return {"status": "missing"}
 
