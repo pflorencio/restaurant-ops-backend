@@ -405,7 +405,7 @@ def get_weekly_budget_raw(store_id: str, business_date: str):
     formula = (
         "AND("
         f"{{Store ID}}='{store_id}',"
-        f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
+        f"{{Week Start}}='{week_start}'"
         ")"
     )
 
