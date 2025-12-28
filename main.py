@@ -395,14 +395,12 @@ async def list_stores():
 # WEEKLY BUDGETS
 # -----------------------------------------------------------
 @app.get("/weekly-budgets")
-def get_weekly_budget_raw(
-    store_id: str,
-    business_date: str,
-):
+def get_weekly_budget_raw(store_id: str, business_date: str):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-    # Normalize to Monday
-    week_start = monday_of_week(dt_date.fromisoformat(business_date)).isoformat()
+    week_start = monday_of_week(
+        dt_date.fromisoformat(business_date)
+    ).isoformat()
 
     formula = (
         "AND("
@@ -414,7 +412,7 @@ def get_weekly_budget_raw(
     records = table.all(formula=formula, max_records=1)
 
     if not records:
-        return {"status": "missing"}
+        return {"status": "empty"}
 
     r = records[0]
     return {
