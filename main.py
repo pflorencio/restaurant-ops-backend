@@ -435,7 +435,7 @@ def upsert_weekly_budget(payload: dict):
     table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
     store_id = payload.get("store_id")
-    week_start = payload.get("week_start")
+    week_start = payload.get("week_start")  # YYYY-MM-DD (Monday)
     kitchen_budget = float(payload.get("kitchen_budget", 0) or 0)
     bar_budget = float(payload.get("bar_budget", 0) or 0)
     submitted_by = payload.get("submitted_by", "System")
@@ -443,17 +443,26 @@ def upsert_weekly_budget(payload: dict):
     if not store_id or not week_start:
         raise HTTPException(400, "store_id and week_start are required")
 
-    ws = dt_date.fromisoformat(week_start)
+    # -------------------------------
+    # Validate week_start
+    # -------------------------------
+    try:
+        ws = dt_date.fromisoformat(week_start)
+    except Exception:
+        raise HTTPException(400, "Invalid week_start format")
+
     if ws.weekday() != 0:
         raise HTTPException(400, "week_start must be a Monday")
 
     week_end = (ws + timedelta(days=6)).isoformat()
 
-    # Prevent past-week edits
+    # Prevent edits to past weeks
     if ws < monday_of_week(dt_date.today()):
         raise HTTPException(403, "Cannot edit budgets for past weeks")
 
-    # ✅ CORRECT MATCH: linked Store record ID
+    # -------------------------------
+    # 🔑 HARD UNIQUE MATCH (Store ID + Week Start)
+    # -------------------------------
     formula = (
         "AND("
         f"{{Store ID}}='{store_id}',"
@@ -461,57 +470,85 @@ def upsert_weekly_budget(payload: dict):
         ")"
     )
 
-    existing = table.all(formula=formula, max_records=1)
-    record = existing[0] if existing else None
+    matches = table.all(formula=formula)
 
+    # 🚨 SAFETY: never allow more than 1 row
+    if len(matches) > 1:
+        raise HTTPException(
+            409,
+            f"Multiple weekly budgets found for store {store_id} and week {week_start}"
+        )
+
+    record = matches[0] if matches else None
     total_budget = kitchen_budget + bar_budget
 
     # -------------------------------
-    # CREATE
+    # CREATE (first time only)
     # -------------------------------
     if not record:
         created = table.create({
             "Store": [store_id],
+            "Store ID": store_id,  # ⭐ CRITICAL
             "Week Start": week_start,
             "Week End": week_end,
+
+            "Original Weekly Budget": total_budget,
+            "Weekly Budget Amount": total_budget,
             "Kitchen Weekly Budget": kitchen_budget,
             "Bar Weekly Budget": bar_budget,
-            "Weekly Budget Amount": total_budget,
+
             "Food Cost Deducted": 0,
             "Remaining Budget": total_budget,
+
             "Status": "Draft",
             "Last Updated At": datetime.utcnow().isoformat(),
+            "Locked At": None,
+            "Locked By": None,
         })
 
         return {
             "status": "created",
             "id": created["id"],
             "weekly_budget": total_budget,
+            "kitchen_budget": kitchen_budget,
+            "bar_budget": bar_budget,
         }
 
     # -------------------------------
-    # UPDATE
+    # UPDATE (idempotent)
     # -------------------------------
     record_id = record["id"]
     fields = record.get("fields", {}) or {}
 
     if fields.get("Status") == "Locked":
-        raise HTTPException(403, "Weekly budget is locked")
+        raise HTTPException(403, "Weekly budget is locked and cannot be edited")
 
     already_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
 
-    table.update(record_id, {
+    updates = {
+        # Always re-assert identity
+        "Store": [store_id],
+        "Store ID": store_id,
+
         "Kitchen Weekly Budget": kitchen_budget,
         "Bar Weekly Budget": bar_budget,
         "Weekly Budget Amount": total_budget,
+
+        # Preserve deductions
         "Remaining Budget": max(0, total_budget - already_deducted),
+
         "Last Updated At": datetime.utcnow().isoformat(),
-    })
+    }
+
+    table.update(record_id, updates)
 
     return {
         "status": "updated",
         "id": record_id,
         "weekly_budget": total_budget,
+        "kitchen_budget": kitchen_budget,
+        "bar_budget": bar_budget,
+        "remaining_budget": max(0, total_budget - already_deducted),
     }
 
 @app.post("/weekly-budgets/lock")
