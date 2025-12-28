@@ -466,13 +466,13 @@ def upsert_weekly_budget(payload: dict):
     total_budget = kitchen_budget + bar_budget
 
     # -------------------------------
-    # Lookup existing budget (CORRECT)
+    # Look for existing budget
     # -------------------------------
     safe_store_name = store_name.replace("'", "\\'")
 
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
+        f"FIND('{safe_store_name}', ARRAYJOIN({{Store (from Store)}})),"
         f"{{Week Start}}='{week_start}'"
         ")"
     )
