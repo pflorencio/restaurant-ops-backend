@@ -457,7 +457,7 @@ def upsert_weekly_budget(payload: dict):
     formula = (
         "AND("
         f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
-        f"{{Week Start}}='{week_start}'"
+        f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
         ")"
     )
 
