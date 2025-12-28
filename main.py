@@ -402,13 +402,10 @@ def get_weekly_budget_raw(store_id: str, business_date: str):
         dt_date.fromisoformat(business_date)
     ).isoformat()
 
-    store_name = resolve_store_display_name(store_id)
-    safe_store_name = store_name.replace("'", "\\'")
-
     formula = (
         "AND("
-        f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
-        f"{{Week Start}}='{week_start}'"
+        f"{{Store ID}}='{store_id}',"
+        f"IS_SAME({{Week Start}}, '{week_start}', 'day')"
         ")"
     )
 
