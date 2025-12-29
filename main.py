@@ -1623,7 +1623,7 @@ def upsert_closing(payload: ClosingCreate):
                     store_name=store_name,
                     business_date=business_date,
                     submitted_by=payload.submitted_by,
-                    reason=email_reason,
+                    reason="resubmission_after_update",
                     closing_fields=fresh.get("fields", {}),
                 )
 
