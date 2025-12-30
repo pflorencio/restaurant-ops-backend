@@ -2652,16 +2652,8 @@ def dashboard_closing_summary(
             + staff_meal_budget
         )
 
-        # -------------------------------------------------
-        # ✅ Variance — Airtable is the source of truth
-        # -------------------------------------------------
-        airtable_variance = num(fields, "Variance (Cash vs Actual)", allow_none=True)
-
-        if airtable_variance is not None:
-            variance = airtable_variance
-        else:
-            # Fallback ONLY if Airtable formula field is missing
-            variance = actual_cash - cash_payments - cash_float
+        # Variance — backend is source of truth
+        variance = actual_cash - cash_payments - cash_float
 
         # -------------------------------------------------
         # Cash for deposit & transfer needed
