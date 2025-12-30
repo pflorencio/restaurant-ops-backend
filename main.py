@@ -2542,14 +2542,16 @@ def dashboard_closing_summary(
         # -----------------------------
         # Helper: safe numeric extraction
         # -----------------------------
-        def num(fields: Dict, key: str) -> float:
+        def num(fields: Dict, key: str, allow_none: bool = False) -> Optional[float]:
             val = fields.get(key)
+            if val is None:
+                return None if allow_none else 0.0
             if isinstance(val, (int, float)):
                 return float(val)
             try:
                 return float(val)
             except (TypeError, ValueError):
-                return 0.0
+                return None if allow_none else 0.0
 
         # -----------------------------
         # 1) Preferred path: store_id + date
@@ -2650,8 +2652,14 @@ def dashboard_closing_summary(
             + staff_meal_budget
         )
 
-        # Variance: Actual Cash - Cash Payments - Float
-        variance = actual_cash - cash_payments - cash_float
+        # Variance — Airtable is source of truth
+        airtable_variance = num(fields, "Variance (Cash vs Actual)", allow_none=True)
+
+        if airtable_variance is not None:
+            variance = airtable_variance
+        else:
+            # fallback only if variance field is missing
+            variance = actual_cash - cash_payments - cash_float
 
         # Cash for deposit & transfer needed:
         # raw = Actual Cash - Float - Total Budgets
@@ -2683,7 +2691,7 @@ def dashboard_closing_summary(
 
         # Optional: include Airtable's formula fields for sanity-checking
         airtable_formulas = {
-            "airtable_variance": fields.get("Variance"),
+            "airtable_variance": fields.get("Variance (Cash vs Actual)"),
             "airtable_total_budgets": fields.get("Total Budgets"),
             "airtable_cash_for_deposit": fields.get("Cash for Deposit"),
         }
