@@ -2397,55 +2397,49 @@ async def verify_closing(payload: dict):
             try:
                 budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
 
-                if not budget_record:
-                    print("No locked weekly budget found — skipping budget update")
+                new_food_spend = float(food_spend_from_fields(fields) or 0)
+                prev_food_spend = float(prev_food_deducted or 0)
+                delta = new_food_spend - prev_food_spend
 
-                    # Always anchor food cost on daily closing
+                if not budget_record:
+                    print("No locked weekly budget found — skipping budget math")
+
+                    # Always anchor on DAILY CLOSING
                     table.update(
                         record_id,
                         {
-                            "Food Cost Deducted": float(food_spend_from_fields(fields) or 0),
+                            "Food Cost Deducted": new_food_spend,
                         },
                     )
 
-                    # IMPORTANT:
-                    # Do NOT return — allow verification email + response to proceed
-                    pass
-
-                new_food_spend = float(food_spend_from_fields(fields) or 0)
-
-                # IMPORTANT: previous spend must come from DAILY CLOSING anchor
-                prev_food_spend = float(prev_food_deducted or 0)
-
-                delta = new_food_spend - prev_food_spend
-
-                # Only skip budget math — NOT the rest of verification
-                if delta == 0 and prev_status == "Verified":
-                    print("No food cost change — skipping weekly budget adjustment")
                 else:
-                    remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                    running_deducted = float(
-                        budget_record["fields"].get("Food Cost Deducted", 0) or 0
-                    )
+                    # Only do budget math if a locked weekly budget exists
+                    if not (delta == 0 and prev_status == "Verified"):
+                        remaining = float(
+                            budget_record["fields"].get("Remaining Budget", 0) or 0
+                        )
+                        running_deducted = float(
+                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        )
 
-                    budget_table.update(
-                        budget_record["id"],
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Remaining Budget": remaining - delta,
+                                "Food Cost Deducted": running_deducted + delta,
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                        print(f"Weekly budget reconciled by delta: {delta}")
+
+                    # Always anchor final value
+                    table.update(
+                        record_id,
                         {
-                            "Remaining Budget": remaining - delta,
-                            "Food Cost Deducted": running_deducted + delta,
-                            "Last Updated At": now_iso,
+                            "Food Cost Deducted": new_food_spend,
                         },
                     )
-
-                    print(f"Weekly budget reconciled by delta: {delta}")
-
-                # Anchor final value on DAILY CLOSING (always)
-                table.update(
-                    record_id,
-                    {
-                        "Food Cost Deducted": new_food_spend,
-                    },
-                )
 
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
