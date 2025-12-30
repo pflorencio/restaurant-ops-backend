@@ -2398,40 +2398,54 @@ async def verify_closing(payload: dict):
                 budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
 
                 if not budget_record:
-                    return
+                    print("No locked weekly budget found — skipping budget update")
+
+                    # Always anchor food cost on daily closing
+                    table.update(
+                        record_id,
+                        {
+                            "Food Cost Deducted": float(food_spend_from_fields(fields) or 0),
+                        },
+                    )
+
+                    # IMPORTANT:
+                    # Do NOT return — allow verification email + response to proceed
+                    pass
 
                 new_food_spend = float(food_spend_from_fields(fields) or 0)
+
+                # IMPORTANT: previous spend must come from DAILY CLOSING anchor
                 prev_food_spend = float(prev_food_deducted or 0)
 
                 delta = new_food_spend - prev_food_spend
 
-                # Nothing changed → do nothing
-                if delta == 0:
+                # Only skip budget math — NOT the rest of verification
+                if delta == 0 and prev_status == "Verified":
                     print("No food cost change — skipping weekly budget adjustment")
-                    return
+                else:
+                    remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
+                    running_deducted = float(
+                        budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                    )
 
-                remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                running_deducted = float(budget_record["fields"].get("Food Cost Deducted", 0) or 0)
+                    budget_table.update(
+                        budget_record["id"],
+                        {
+                            "Remaining Budget": remaining - delta,
+                            "Food Cost Deducted": running_deducted + delta,
+                            "Last Updated At": now_iso,
+                        },
+                    )
 
-                # Apply delta (can be + or -)
-                budget_table.update(
-                    budget_record["id"],
-                    {
-                        "Remaining Budget": remaining - delta,
-                        "Food Cost Deducted": running_deducted + delta,
-                        "Last Updated At": now_iso,
-                    },
-                )
+                    print(f"Weekly budget reconciled by delta: {delta}")
 
-                # Anchor final value on DAILY CLOSING
+                # Anchor final value on DAILY CLOSING (always)
                 table.update(
                     record_id,
                     {
                         "Food Cost Deducted": new_food_spend,
                     },
                 )
-
-                print(f"Weekly budget reconciled by delta: {delta}")
 
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
