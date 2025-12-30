@@ -2307,6 +2307,25 @@ async def verify_closing(payload: dict):
         prev_food_deducted = float(before_fields.get("Food Cost Deducted", 0) or 0)
 
         # -------------------------------------------------------
+        # Helper: safe numeric extraction
+        # -------------------------------------------------------
+        def num(fields: dict, key: str) -> float:
+            try:
+                return float(fields.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # -------------------------------------------------------
+        # Helper: compute variance (SOURCE OF TRUTH)
+        # Mirrors CashierForm + dashboard logic
+        # -------------------------------------------------------
+        def compute_variance(fields: dict) -> float:
+            actual_cash = num(fields, "Actual Cash Counted")
+            cash_payments = num(fields, "Cash Payments")
+            cash_float = num(fields, "Cash Float")
+            return actual_cash - cash_payments - cash_float
+
+        # -------------------------------------------------------
         # 1) Base fields that always update
         # -------------------------------------------------------
         update_fields = {
@@ -2343,15 +2362,12 @@ async def verify_closing(payload: dict):
 
             store_id = store_ids[0]  # recXXXX
 
-            # Resolve store display name (must match Weekly Budgets "Store" linked record)
             store_name = resolve_store_display_name(store_id)
             if not store_name:
-                store_name = str(store_id)  # safe fallback (prevents crash)
+                store_name = str(store_id)
 
-            # 🔑 REQUIRED: escape for Airtable formula
             safe_store_name = store_name.replace("'", "\\'")
 
-            # Robust date parsing
             try:
                 business_date = parse_airtable_date(business_date_raw)
             except Exception:
@@ -2360,7 +2376,6 @@ async def verify_closing(payload: dict):
             week_start = monday_of_week(business_date).isoformat()
             budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-            # ✅ Match BOTH Draft and Locked budgets
             formula = (
                 "AND("
                 f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
@@ -2369,17 +2384,7 @@ async def verify_closing(payload: dict):
                 ")"
             )
 
-            print("Weekly budget lookup:")
-            print("Store ID:", store_id)
-            print("Resolved store name:", store_name)
-            print("Business date raw:", business_date_raw)
-            print("Parsed business date:", business_date.isoformat())
-            print("Week start:", week_start)
-            print("Formula:", formula)
-
             records = budget_table.all(formula=formula, max_records=1)
-            print("Weekly budget records found:", len(records))
-
             if not records:
                 return budget_table, None, week_start
 
@@ -2388,42 +2393,27 @@ async def verify_closing(payload: dict):
         # ---------------------------------------------------
         # 4) Weekly budget adjustment logic (SAFE + REVERSIBLE)
         # ---------------------------------------------------
-
         fresh = table.get(record_id)
         fields = fresh.get("fields", {}) if fresh else {}
 
-        current_food_deducted = float(fields.get("Food Cost Deducted", 0) or 0)
+        current_food_deducted = num(fields, "Food Cost Deducted")
 
         # =========================
         # VERIFYING
         # =========================
         if status == "Verified":
             try:
-                budget_table, budget_record, week_start = get_locked_weekly_budget_record(fields)
+                budget_table, budget_record, _ = get_locked_weekly_budget_record(fields)
 
                 new_food_spend = float(food_spend_from_fields(fields) or 0)
                 prev_food_spend = float(prev_food_deducted or 0)
                 delta = new_food_spend - prev_food_spend
 
-                if not budget_record:
-                    print("No locked weekly budget found — skipping budget math")
-
-                    # Always anchor on DAILY CLOSING
-                    table.update(
-                        record_id,
-                        {
-                            "Food Cost Deducted": new_food_spend,
-                        },
-                    )
-
-                else:
-                    # Only do budget math if a locked weekly budget exists
+                if budget_record:
                     if not (delta == 0 and prev_status == "Verified"):
-                        remaining = float(
-                            budget_record["fields"].get("Remaining Budget", 0) or 0
-                        )
-                        running_deducted = float(
-                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        remaining = num(budget_record["fields"], "Remaining Budget")
+                        running_deducted = num(
+                            budget_record["fields"], "Food Cost Deducted"
                         )
 
                         budget_table.update(
@@ -2435,15 +2425,12 @@ async def verify_closing(payload: dict):
                             },
                         )
 
-                        print(f"Weekly budget reconciled by delta: {delta}")
-
-                    # Always anchor final value
-                    table.update(
-                        record_id,
-                        {
-                            "Food Cost Deducted": new_food_spend,
-                        },
-                    )
+                table.update(
+                    record_id,
+                    {
+                        "Food Cost Deducted": new_food_spend,
+                    },
+                )
 
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
@@ -2454,29 +2441,34 @@ async def verify_closing(payload: dict):
         else:
             if prev_status == "Verified" and current_food_deducted > 0:
                 try:
-                    budget_table, budget_record, week_start = get_locked_weekly_budget_record(before_fields)
+                    budget_table, budget_record, _ = get_locked_weekly_budget_record(
+                        before_fields
+                    )
+
                     if budget_record:
-                        remaining = float(budget_record["fields"].get("Remaining Budget", 0) or 0)
-                        running_deducted = float(
-                            budget_record["fields"].get("Food Cost Deducted", 0) or 0
+                        remaining = num(budget_record["fields"], "Remaining Budget")
+                        running_deducted = num(
+                            budget_record["fields"], "Food Cost Deducted"
                         )
 
                         budget_table.update(
                             budget_record["id"],
                             {
                                 "Remaining Budget": remaining + current_food_deducted,
-                                "Food Cost Deducted": max(0, running_deducted - current_food_deducted),
+                                "Food Cost Deducted": max(
+                                    0, running_deducted - current_food_deducted
+                                ),
                                 "Last Updated At": now_iso,
                             },
                         )
 
-                    # Clear anchor
                     table.update(
                         record_id,
                         {
                             "Food Cost Deducted": 0,
                         }
                     )
+
                 except Exception as budget_err:
                     print("Weekly budget reversal error:", budget_err)
 
@@ -2490,13 +2482,18 @@ async def verify_closing(payload: dict):
                 or "Unknown Store"
             )
 
+            computed_variance = compute_variance(fields)
+
             send_closing_verification_email(
                 store_name=store_name,
                 business_date=fields.get("Date"),
                 cashier_name=fields.get("Submitted By"),
                 verified_by=verified_by or "System",
                 manager_notes=notes or "",
-                closing_fields=fields,
+                closing_fields={
+                    **fields,
+                    "Computed Variance": computed_variance,
+                },
             )
 
     except Exception as e:
