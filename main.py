@@ -2332,7 +2332,7 @@ async def verify_closing(payload: dict):
         table.update(record_id, update_fields)
 
         # ---------------------------------------------------
-        # Helper: locate the locked weekly budget row
+        # Helper: locate the weekly budget row (Draft or Locked)
         # ---------------------------------------------------
         def get_locked_weekly_budget_record(fields: dict):
             store_ids = fields.get("Store") or []
@@ -2343,9 +2343,13 @@ async def verify_closing(payload: dict):
 
             store_id = store_ids[0]  # recXXXX
 
+            # Resolve store display name (must match Weekly Budgets "Store" linked record)
             store_name = resolve_store_display_name(store_id)
             if not store_name:
-                store_name = str(store_id)  # fallback (won’t match weekly budgets, but avoids crash)
+                store_name = str(store_id)  # safe fallback (prevents crash)
+
+            # 🔑 REQUIRED: escape for Airtable formula
+            safe_store_name = store_name.replace("'", "\\'")
 
             # Robust date parsing
             try:
@@ -2356,6 +2360,7 @@ async def verify_closing(payload: dict):
             week_start = monday_of_week(business_date).isoformat()
             budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
+            # ✅ Match BOTH Draft and Locked budgets
             formula = (
                 "AND("
                 f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
