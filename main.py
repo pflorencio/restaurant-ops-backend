@@ -50,7 +50,11 @@ origins = [
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=origins,
+    allow_origins=[
+        "https://app.logbook.ph",
+        "https://admin.logbook.ph",
+        "https://logbook-app-jjac.onrender.com",  # optional safety fallback
+    ],
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
