@@ -2356,10 +2356,9 @@ async def verify_closing(payload: dict):
             week_start = monday_of_week(business_date).isoformat()
             budget_table = _airtable_table(WEEKLY_BUDGETS_TABLE)
 
-            safe_store_name = store_name.replace("'", "\\'")
             formula = (
                 "AND("
-                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
+                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
                 f"IS_SAME({{Week Start}}, '{week_start}', 'day'),"
                 "{Status}='Locked'"
                 ")"
