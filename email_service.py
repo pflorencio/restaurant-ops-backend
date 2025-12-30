@@ -146,6 +146,34 @@ This is an automated message.
 # -----------------------------------------------------------
 # ✅ VERIFICATION SUMMARY EMAIL
 # -----------------------------------------------------------
+def extract_variance(fields: dict):
+    """
+    Unified variance resolver for emails.
+    Priority:
+    1) Backend computed
+    2) Airtable formula
+    3) Legacy field
+    """
+    if not fields:
+        return None
+
+    # 1️⃣ Backend source of truth
+    if "Computed Variance" in fields:
+        try:
+            return float(fields["Computed Variance"])
+        except (TypeError, ValueError):
+            pass
+
+    # 2️⃣ Airtable formula fallback
+    for key in ["Variance (Cash vs Actual)", "Variance"]:
+        if key in fields:
+            try:
+                return float(fields[key])
+            except (TypeError, ValueError):
+                pass
+
+    return None
+
 def send_closing_verification_email(
     store_name: str,
     business_date: str,
@@ -183,7 +211,7 @@ def send_closing_verification_email(
         )
 
         # Variance / deposits
-        variance = f.get("Variance")
+        variance = extract_variance(f)
         cash_for_deposit = f.get("Cash for Deposit")
         bank_transfer = f.get("Bank Transfer Payments")
 
