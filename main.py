@@ -2358,9 +2358,9 @@ async def verify_closing(payload: dict):
 
             formula = (
                 "AND("
-                f"FIND('{store_id}', ARRAYJOIN({{Store}})),"
+                f"FIND('{safe_store_name}', ARRAYJOIN({{Store}})),"
                 f"IS_SAME({{Week Start}}, '{week_start}', 'day'),"
-                "{Status}='Locked'"
+                "OR({Status}='Draft',{Status}='Locked')"
                 ")"
             )
 
