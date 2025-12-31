@@ -2287,12 +2287,21 @@ def get_history(
 async def verify_closing(payload: dict):
     """
     Update verification status, notes, and lock state for a closing record.
+    Also persists admin-entered deposit adjustments:
+    - Card Tips
+    - Returned Change
+    - Deposit Discrepancy
     """
 
     record_id = payload.get("record_id")
     status = payload.get("status")
     verified_by = payload.get("verified_by")
     notes = payload.get("notes")
+
+    # ✅ New admin-entered fields (optional)
+    card_tips = payload.get("card_tips")
+    returned_change = payload.get("returned_change")
+    deposit_discrepancy = payload.get("deposit_discrepancy")
 
     if not record_id or not status:
         raise HTTPException(status_code=400, detail="Missing record_id or status")
@@ -2321,7 +2330,6 @@ async def verify_closing(payload: dict):
 
         # -------------------------------------------------------
         # Helper: compute variance (SOURCE OF TRUTH)
-        # Mirrors CashierForm + dashboard logic
         # -------------------------------------------------------
         def compute_variance(fields: dict) -> float:
             actual_cash = num(fields, "Actual Cash Counted")
@@ -2338,6 +2346,18 @@ async def verify_closing(payload: dict):
             "Verified By": verified_by or "System",
             "Last Updated By": verified_by or "System",
         }
+
+        # -------------------------------------------------------
+        # 1A) Persist admin-entered deposit adjustments (SAFE)
+        # -------------------------------------------------------
+        if card_tips is not None:
+            update_fields["Card Tips"] = float(card_tips)
+
+        if returned_change is not None:
+            update_fields["Returned Change"] = float(returned_change)
+
+        if deposit_discrepancy is not None:
+            update_fields["Deposit Discrepancy"] = float(deposit_discrepancy)
 
         # -------------------------------------------------------
         # 2) Locking behaviour
@@ -2395,16 +2415,13 @@ async def verify_closing(payload: dict):
             return budget_table, records[0], week_start
 
         # ---------------------------------------------------
-        # 4) Weekly budget adjustment logic (SAFE + REVERSIBLE)
+        # 4) Weekly budget adjustment logic (UNCHANGED)
         # ---------------------------------------------------
         fresh = table.get(record_id)
         fields = fresh.get("fields", {}) if fresh else {}
 
         current_food_deducted = num(fields, "Food Cost Deducted")
 
-        # =========================
-        # VERIFYING
-        # =========================
         if status == "Verified":
             try:
                 budget_table, budget_record, _ = get_locked_weekly_budget_record(fields)
@@ -2439,9 +2456,6 @@ async def verify_closing(payload: dict):
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
 
-        # =========================
-        # UN-VERIFYING → REVERSE
-        # =========================
         else:
             if prev_status == "Verified" and current_food_deducted > 0:
                 try:
@@ -2477,30 +2491,7 @@ async def verify_closing(payload: dict):
                     print("Weekly budget reversal error:", budget_err)
 
         # ---------------------------------------------------
-        # 5) 💰 FINAL CASH FOR DEPOSIT (NEW – SAFE)
-        # ---------------------------------------------------
-        if status == "Verified":
-            base_cash = num(fields, "Cash for Deposit")
-            card_tips = num(fields, "Card Tips")
-            returned_change = num(fields, "Returned Change")
-            discrepancy = num(fields, "Deposit Discrepancy")
-
-            final_cash_for_deposit = (
-                base_cash
-                - card_tips
-                + discrepancy
-                + returned_change
-            )
-
-            table.update(
-                record_id,
-                {
-                    "Total Cash Deposits": round(final_cash_for_deposit, 2),
-                }
-            )
-
-        # ---------------------------------------------------
-        # 6) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
+        # 5) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
         # ---------------------------------------------------
         if status == "Verified":
             store_name = (
