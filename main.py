@@ -1993,7 +1993,6 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
             "Bar Budget": merged.get("Bar Budget"),
             "Non Food Budget": merged.get("Non Food Budget"),
             "Staff Meal Budget": merged.get("Staff Meal Budget"),
-            "Cash for Deposit": merged.get("Cash for Deposit"),
         }
 
         # 0️⃣ Reject NaN / Infinity / negatives
@@ -2021,7 +2020,6 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
         marketing_expenses = numeric_values["Marketing Expenses"] or 0
         actual_cash = numeric_values["Actual Cash Counted"]
         cash_float = numeric_values["Cash Float"]
-        cash_for_deposit = numeric_values["Cash for Deposit"]
         kitchen_budget = numeric_values["Kitchen Budget"] or 0
         bar_budget = numeric_values["Bar Budget"] or 0
         non_food_budget = numeric_values["Non Food Budget"] or 0
@@ -2052,18 +2050,6 @@ def patch_closing(record_id: str, payload: ClosingUpdate):
                     detail=(
                         f"Sum of payments ({payments_sum}) must equal "
                         f"Total Sales ({total_sales}) within ±₱1."
-                    ),
-                )
-
-        # 3️⃣ Cash reconciliation: Cash for Deposit ≈ Actual Cash - Float
-        if actual_cash is not None and cash_float is not None and cash_for_deposit is not None:
-            expected_deposit = actual_cash - cash_float
-            if abs(expected_deposit - cash_for_deposit) > 1:
-                raise HTTPException(
-                    status_code=400,
-                    detail=(
-                        f"Cash for Deposit should be {expected_deposit} "
-                        f"based on Actual Cash Counted minus Cash Float."
                     ),
                 )
 
@@ -2545,7 +2531,7 @@ def dashboard_closing_summary(
     """
     Dashboard-friendly endpoint that returns:
     - The unique closing record for a given store + date
-    - Backend-computed summary metrics (variance, budgets, cash for deposit, transfer needed)
+    - Summary metrics sourced from Airtable formulas (single source of truth)
 
     Priority:
     1. Use store_id (linked Store record) if provided
@@ -2639,7 +2625,7 @@ def dashboard_closing_summary(
         fields = record.get("fields", {})
         lock_status = fields.get("Lock Status", "Unlocked")
 
-        # Core numeric values
+        # Core numeric values (raw inputs)
         total_sales = num(fields, "Total Sales")
         net_sales = num(fields, "Net Sales")
 
@@ -2659,7 +2645,7 @@ def dashboard_closing_summary(
         actual_cash = num(fields, "Actual Cash Counted")
         cash_float = num(fields, "Cash Float")
 
-        # Backend-computed totals (mirror frontend logic)
+        # Backend-computed helper (non-authoritative)
         total_budgets = (
             kitchen_budget
             + bar_budget
@@ -2670,7 +2656,9 @@ def dashboard_closing_summary(
         # -------------------------------------------------
         # ✅ VARIANCE — Airtable is source of truth
         # -------------------------------------------------
-        airtable_variance = num(fields, "Variance (Cash vs Actual)", allow_none=True)
+        airtable_variance = num(
+            fields, "Variance (Cash Payments vs Actual)", allow_none=True
+        )
 
         if airtable_variance is not None:
             variance = airtable_variance
@@ -2679,11 +2667,27 @@ def dashboard_closing_summary(
             variance = actual_cash - cash_payments - cash_float
 
         # -------------------------------------------------
-        # Cash for deposit & transfer needed
+        # ✅ CASH FOR DEPOSIT & TRANSFER NEEDED
+        # Airtable formulas are authoritative
         # -------------------------------------------------
-        raw_cash_for_deposit = actual_cash - cash_float - total_budgets
-        cash_for_deposit = raw_cash_for_deposit if raw_cash_for_deposit > 0 else 0.0
-        transfer_needed = abs(raw_cash_for_deposit) if raw_cash_for_deposit < 0 else 0.0
+        airtable_cash_for_deposit = num(
+            fields, "Cash for Deposit", allow_none=True
+        )
+        airtable_transfer_needed = num(
+            fields, "Transfer Needed", allow_none=True
+        )
+
+        cash_for_deposit = (
+            airtable_cash_for_deposit
+            if airtable_cash_for_deposit is not None
+            else actual_cash - cash_float - total_budgets
+        )
+
+        transfer_needed = (
+            airtable_transfer_needed
+            if airtable_transfer_needed is not None
+            else abs(cash_for_deposit) if cash_for_deposit < 0 else 0.0
+        )
 
         summary = {
             "total_sales": total_sales,
@@ -2709,9 +2713,12 @@ def dashboard_closing_summary(
 
         # Optional: include Airtable's formula fields for sanity-checking
         airtable_formulas = {
-            "airtable_variance": fields.get("Variance (Cash vs Actual)"),
-            "airtable_total_budgets": fields.get("Total Budgets"),
+            "airtable_variance": fields.get(
+                "Variance (Cash Payments vs Actual)"
+            ),
+            "airtable_total_budgets": fields.get("Total Budget"),
             "airtable_cash_for_deposit": fields.get("Cash for Deposit"),
+            "airtable_transfer_needed": fields.get("Transfer Needed"),
         }
 
         store_display = (
