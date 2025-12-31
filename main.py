@@ -2364,7 +2364,7 @@ async def verify_closing(payload: dict):
             if not store_ids or not business_date_raw:
                 return None, None, None
 
-            store_id = store_ids[0]  # recXXXX
+            store_id = store_ids[0]
 
             store_name = resolve_store_display_name(store_id)
             if not store_name:
@@ -2477,7 +2477,30 @@ async def verify_closing(payload: dict):
                     print("Weekly budget reversal error:", budget_err)
 
         # ---------------------------------------------------
-        # 5) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
+        # 5) 💰 FINAL CASH FOR DEPOSIT (NEW – SAFE)
+        # ---------------------------------------------------
+        if status == "Verified":
+            base_cash = num(fields, "Cash for Deposit")
+            card_tips = num(fields, "Card Tips")
+            returned_change = num(fields, "Returned Change")
+            discrepancy = num(fields, "Deposit Discrepancy")
+
+            final_cash_for_deposit = (
+                base_cash
+                - card_tips
+                + discrepancy
+                + returned_change
+            )
+
+            table.update(
+                record_id,
+                {
+                    "Total Cash Deposits": round(final_cash_for_deposit, 2),
+                }
+            )
+
+        # ---------------------------------------------------
+        # 6) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
         # ---------------------------------------------------
         if status == "Verified":
             store_name = (
