@@ -184,6 +184,7 @@ def send_closing_verification_email(
 ):
     """
     Sends final verification summary after manager approval (non-blocking).
+    Includes Deposit Adjustments summary for audit clarity.
     """
 
     try:
@@ -210,9 +211,14 @@ def send_closing_verification_email(
             ]
         )
 
-        # Variance / deposits
+        # Variance
         variance = extract_variance(f)
-        cash_for_deposit = f.get("Cash for Deposit")
+
+        # Deposit-related fields (Airtable formula + admin inputs)
+        card_tips = f.get("Card Tips") or 0
+        returned_change = f.get("Returned Change") or 0
+        deposit_discrepancy = f.get("Deposit Discrepancy") or 0
+        cash_for_deposit = f.get("Cash for Deposit") or 0
         bank_transfer = f.get("Bank Transfer Payments")
 
         # ---------------------------------------------------
@@ -253,10 +259,18 @@ VARIANCE
 Variance: {peso(variance)}
 
 ----------------------------------
+DEPOSIT ADJUSTMENTS (ADMIN)
+----------------------------------
+Card Tips:           {peso(card_tips)}
+Returned Change:     {peso(returned_change)}
+Deposit Discrepancy: {peso(deposit_discrepancy)}
+
+Final Cash for Deposit: {peso(cash_for_deposit)}
+
+----------------------------------
 DEPOSITS & TRANSFERS
 ----------------------------------
-Cash for Deposit: {peso(cash_for_deposit)}
-Bank Transfers:   {peso(bank_transfer)}
+Bank Transfers: {peso(bank_transfer)}
 
 ----------------------------------
 This closing has been verified and locked.

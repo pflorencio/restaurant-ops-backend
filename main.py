@@ -2276,7 +2276,9 @@ async def verify_closing(payload: dict):
     Also persists admin-entered deposit adjustments:
     - Card Tips
     - Returned Change
-    - Deposit Discrepancy
+
+    NOTE:
+    - Deposit Discrepancy is computed automatically in Airtable (formula)
     """
 
     record_id = payload.get("record_id")
@@ -2284,10 +2286,9 @@ async def verify_closing(payload: dict):
     verified_by = payload.get("verified_by")
     notes = payload.get("notes")
 
-    # ✅ New admin-entered fields (optional)
+    # ✅ Admin-entered fields (optional)
     card_tips = payload.get("card_tips")
     returned_change = payload.get("returned_change")
-    deposit_discrepancy = payload.get("deposit_discrepancy")
 
     if not record_id or not status:
         raise HTTPException(status_code=400, detail="Missing record_id or status")
@@ -2341,9 +2342,6 @@ async def verify_closing(payload: dict):
 
         if returned_change is not None:
             update_fields["Returned Change"] = float(returned_change)
-
-        if deposit_discrepancy is not None:
-            update_fields["Deposit Discrepancy"] = float(deposit_discrepancy)
 
         # -------------------------------------------------------
         # 2) Locking behaviour
