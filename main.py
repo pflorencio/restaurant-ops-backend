@@ -191,6 +191,10 @@ def resolve_store_display_name(store_id: str) -> str:
         print("⚠️ resolve_store_display_name failed:", e)
         return ""
 
+def get_all_store_ids():
+    stores_table = _airtable_table("stores")
+    records = stores_table.all()
+    return [r["id"] for r in records]
 # -----------------------------------------------------------
 # 🧠 Shared User Validation Logic
 # -----------------------------------------------------------
@@ -1213,16 +1217,17 @@ def create_user(payload: UserCreate):
             fields["Store"] = [store]            # linked record
             fields["Store Access"] = [store]    # multiple select label
 
-        elif payload.role == "manager":
-            if payload.store:
-                fields["Store"] = [payload.store]
+        elif payload.role in ["manager", "admin"]:
+        all_stores = get_all_store_ids()
 
-            if payload.store_access:
-                fields["Store Access"] = payload.store_access
+        if not all_stores:
+            raise HTTPException(
+                status_code=400,
+                detail="No stores exist. Cannot assign admin/manager access.",
+            )
 
-        elif payload.role == "admin":
-            fields["Store"] = []
-            fields["Store Access"] = []
+        fields["Store"] = []  # Admins/Managers are not tied to a single store
+        fields["Store Access"] = all_stores
 
         created = table.create(fields)
 
