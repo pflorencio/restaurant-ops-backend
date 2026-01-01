@@ -1425,6 +1425,9 @@ def upsert_closing(payload: ClosingCreate):
         store_name = (payload.store or "").strip()
         business_date = payload.business_date.isoformat()
 
+        # ✅ NEW: Closing Notes (Cashier)
+        closing_notes = getattr(payload, "closing_notes", None)
+
         # -----------------------------------------
         # Resolve tenant
         # -----------------------------------------
@@ -1572,6 +1575,10 @@ def upsert_closing(payload: ClosingCreate):
             "Staff Meal Budget": payload.staff_meal_budget,
         }
 
+        # ✅ NEW: Persist cashier notes
+        if closing_notes:
+            fields["Closing Notes"] = closing_notes
+
         if store_id:
             fields["Store"] = [store_id]
         else:
@@ -1589,17 +1596,15 @@ def upsert_closing(payload: ClosingCreate):
             rec_id = existing["id"]
             lock_status = existing["fields"].get("Lock Status", "Unlocked")
 
-            # 🔄 Resubmission after Needs Update → reset verification state
             prev_verified_status = existing["fields"].get("Verified Status")
 
             if prev_verified_status == "Needs Update":
                 fields.update({
                     "Verified Status": "Pending",
                     "Verified At": None,
-                    "Food Cost Deducted": 0,  # reset so /verify recalculates delta cleanly
+                    "Food Cost Deducted": 0,
                 })
 
-            # 🔓 Allow edit if coming from Needs Update
             if lock_status in ["Locked", "Verified"] and prev_verified_status != "Needs Update":
                 raise HTTPException(
                     403, f"Record for {store_name} on {business_date} is locked."
@@ -1621,7 +1626,6 @@ def upsert_closing(payload: ClosingCreate):
                 tenant_id=tenant_id,
             )
 
-            # 📧 Email ONLY if resubmission after Needs Update
             if email_reason == "resubmission_after_update":
                 send_closing_submission_email(
                     store_name=store_name,
@@ -1657,7 +1661,6 @@ def upsert_closing(payload: ClosingCreate):
             tenant_id=tenant_id,
         )
 
-        # 📧 Email on first submission
         send_closing_submission_email(
             store_name=store_name,
             business_date=business_date,
