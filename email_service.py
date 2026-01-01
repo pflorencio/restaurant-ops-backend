@@ -86,6 +86,9 @@ def send_closing_submission_email(
         actual_cash = peso(f.get("Actual Cash Counted"))
         cash_float = peso(f.get("Cash Float"))
 
+        # Closing notes (cashier)
+        closing_notes = f.get("Closing Notes")
+
         # ---------------------------------------------------
         # Email Body
         # ---------------------------------------------------
@@ -120,6 +123,11 @@ CASH HANDLING
 ----------------------------------
 Actual Cash Counted: {actual_cash}
 Cash Float:          {cash_float}
+
+----------------------------------
+CLOSING NOTES (CASHIER)
+----------------------------------
+{closing_notes or "— None —"}
 
 ----------------------------------
 This is an automated message.
