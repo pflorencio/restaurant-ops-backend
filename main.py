@@ -1215,19 +1215,19 @@ def create_user(payload: UserCreate):
                 )
 
             fields["Store"] = [store]            # linked record
-            fields["Store Access"] = [store]    # multiple select label
+            fields["Store Access"] = [store]     # store access list
 
         elif payload.role in ["manager", "admin"]:
-        all_stores = get_all_store_ids()
+            all_stores = get_all_store_ids()
 
-        if not all_stores:
-            raise HTTPException(
-                status_code=400,
-                detail="No stores exist. Cannot assign admin/manager access.",
-            )
+            if not all_stores:
+                raise HTTPException(
+                    status_code=400,
+                    detail="No stores exist. Cannot assign admin/manager access.",
+                )
 
-        fields["Store"] = []  # Admins/Managers are not tied to a single store
-        fields["Store Access"] = all_stores
+            fields["Store"] = []                 # not tied to a single store
+            fields["Store Access"] = all_stores
 
         created = table.create(fields)
 
