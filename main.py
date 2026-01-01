@@ -265,6 +265,7 @@ class ClosingCreate(BaseModel):
     total_budgets: Optional[float] = 0.0
     cash_for_deposit: Optional[float] = 0.0
     transfer_needed: Optional[float] = 0.0
+    closing_notes: Optional[str] = None
     tenant_id: Optional[str] = None
     attachments: Optional[str] = None
     submitted_by: Optional[str] = None
