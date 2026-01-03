@@ -2354,12 +2354,31 @@ async def verify_closing(payload: dict):
         prev_status = (before_fields.get("Verified Status") or "").strip()
         prev_food_deducted = float(before_fields.get("Food Cost Deducted", 0) or 0)
 
+        # ✅ NEW: prior kitchen/bar deducted on THIS closing record (for delta + reversal)
+        prev_kitchen_deducted = float(before_fields.get("Kitchen Cost Deducted", 0) or 0)
+        prev_bar_deducted = float(before_fields.get("Bar Cost Deducted", 0) or 0)
+
         # -------------------------------------------------------
         # Helper: safe numeric extraction
         # -------------------------------------------------------
         def num(fields: dict, key: str) -> float:
             try:
                 return float(fields.get(key) or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        # -------------------------------------------------------
+        # ✅ NEW: helpers to extract daily kitchen/bar spend from closing fields
+        # -------------------------------------------------------
+        def kitchen_spend_from_fields(fields: dict) -> float:
+            try:
+                return float(fields.get("Kitchen Budget") or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        def bar_spend_from_fields(fields: dict) -> float:
+            try:
+                return float(fields.get("Bar Budget") or 0)
             except (TypeError, ValueError):
                 return 0.0
 
@@ -2450,17 +2469,22 @@ async def verify_closing(payload: dict):
             return budget_table, records[0], week_start
 
         # ---------------------------------------------------
-        # 4) Weekly budget adjustment logic (UNCHANGED)
+        # 4) Weekly budget adjustment logic (UPDATED: Total + Kitchen/Bar)
         # ---------------------------------------------------
         fresh = table.get(record_id)
         fields = fresh.get("fields", {}) if fresh else {}
 
         current_food_deducted = num(fields, "Food Cost Deducted")
+        current_kitchen_deducted = num(fields, "Kitchen Cost Deducted")
+        current_bar_deducted = num(fields, "Bar Cost Deducted")
 
         if status == "Verified":
             try:
                 budget_table, budget_record, _ = get_locked_weekly_budget_record(fields)
 
+                # -----------------------------
+                # Existing TOTAL food spend logic
+                # -----------------------------
                 new_food_spend = float(food_spend_from_fields(fields) or 0)
                 prev_food_spend = float(prev_food_deducted or 0)
                 delta = new_food_spend - prev_food_spend
@@ -2488,10 +2512,52 @@ async def verify_closing(payload: dict):
                     },
                 )
 
+                # -----------------------------
+                # ✅ NEW: Kitchen + Bar deducted tracking
+                # - Updates weekly budget record fields:
+                #   Kitchen Cost Deducted / Bar Cost Deducted (currency)
+                # - Does NOT write to Remaining Kitchen/Bar (FORMULA)
+                # - Writes Kitchen/Bar Cost Deducted on the closing row (ledger)
+                # -----------------------------
+                new_kitchen_spend = kitchen_spend_from_fields(fields)
+                new_bar_spend = bar_spend_from_fields(fields)
+
+                delta_kitchen = float(new_kitchen_spend or 0) - float(prev_kitchen_deducted or 0)
+                delta_bar = float(new_bar_spend or 0) - float(prev_bar_deducted or 0)
+
+                if budget_record:
+                    wk_kitchen_deducted = num(budget_record["fields"], "Kitchen Cost Deducted")
+                    wk_bar_deducted = num(budget_record["fields"], "Bar Cost Deducted")
+
+                    if not (
+                        delta_kitchen == 0
+                        and delta_bar == 0
+                        and prev_status == "Verified"
+                    ):
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Kitchen Cost Deducted": wk_kitchen_deducted + delta_kitchen,
+                                "Bar Cost Deducted": wk_bar_deducted + delta_bar,
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                table.update(
+                    record_id,
+                    {
+                        "Kitchen Cost Deducted": new_kitchen_spend,
+                        "Bar Cost Deducted": new_bar_spend,
+                    },
+                )
+
             except Exception as budget_err:
                 print("Weekly budget update error:", budget_err)
 
         else:
+            # -----------------------------
+            # Existing TOTAL reversal logic
+            # -----------------------------
             if prev_status == "Verified" and current_food_deducted > 0:
                 try:
                     budget_table, budget_record, _ = get_locked_weekly_budget_record(
@@ -2524,6 +2590,41 @@ async def verify_closing(payload: dict):
 
                 except Exception as budget_err:
                     print("Weekly budget reversal error:", budget_err)
+
+            # -----------------------------
+            # ✅ NEW: Kitchen/Bar reversal logic
+            # - Only reverses if it was previously Verified
+            # - Uses stored "Kitchen/Bar Cost Deducted" on the closing row as the reversal amount
+            # -----------------------------
+            if prev_status == "Verified" and (current_kitchen_deducted > 0 or current_bar_deducted > 0):
+                try:
+                    budget_table, budget_record, _ = get_locked_weekly_budget_record(
+                        before_fields
+                    )
+
+                    if budget_record:
+                        wk_kitchen_deducted = num(budget_record["fields"], "Kitchen Cost Deducted")
+                        wk_bar_deducted = num(budget_record["fields"], "Bar Cost Deducted")
+
+                        budget_table.update(
+                            budget_record["id"],
+                            {
+                                "Kitchen Cost Deducted": max(0, wk_kitchen_deducted - current_kitchen_deducted),
+                                "Bar Cost Deducted": max(0, wk_bar_deducted - current_bar_deducted),
+                                "Last Updated At": now_iso,
+                            },
+                        )
+
+                    table.update(
+                        record_id,
+                        {
+                            "Kitchen Cost Deducted": 0,
+                            "Bar Cost Deducted": 0,
+                        }
+                    )
+
+                except Exception as budget_err:
+                    print("Weekly kitchen/bar budget reversal error:", budget_err)
 
         # ---------------------------------------------------
         # 5) 📧 VERIFICATION EMAIL (ONLY WHEN VERIFIED)
