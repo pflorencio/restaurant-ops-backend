@@ -445,9 +445,36 @@ def get_weekly_budget_raw(store_id: str, business_date: str):
     r = records[0]
     fields = r.get("fields", {}) or {}
 
+    # -------------------------------------------------------
+    # SAFE numeric extraction
+    # -------------------------------------------------------
+    def num(val):
+        try:
+            return float(val or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # -------------------------------------------------------
+    # Extract budgets
+    # -------------------------------------------------------
+    weekly_budget = num(fields.get("Weekly Budget Amount"))
+    remaining_budget = num(fields.get("Remaining Budget"))
+
+    kitchen_budget = num(fields.get("Kitchen Weekly Budget"))
+    bar_budget = num(fields.get("Bar Weekly Budget"))
+
+    kitchen_remaining = num(fields.get("Remaining Kitchen Budget"))
+    bar_remaining = num(fields.get("Remaining Bar Budget"))
+
+    # Daily envelope (guide only)
+    kitchen_daily_envelope = kitchen_budget / 7 if kitchen_budget else 0
+    bar_daily_envelope = bar_budget / 7 if bar_budget else 0
+
+    # -------------------------------------------------------
     # ✅ Return BOTH:
-    # - "fields" (for the cashier form context UI)
-    # - flat keys (for your admin weekly budget page which expects them)
+    # - "fields" (for cashier context UI)
+    # - flat keys (for admin + frontend convenience)
+    # -------------------------------------------------------
     return {
         "status": "found",
         "id": r["id"],
@@ -456,11 +483,21 @@ def get_weekly_budget_raw(store_id: str, business_date: str):
         # Backward-compatible flattened keys
         "week_start": fields.get("Week Start"),
         "week_end": fields.get("Week End"),
-        "weekly_budget": fields.get("Weekly Budget Amount"),
-        "kitchen_budget": fields.get("Kitchen Weekly Budget"),
-        "bar_budget": fields.get("Bar Weekly Budget"),
-        "remaining_budget": fields.get("Remaining Budget"),
-        "food_cost_deducted": fields.get("Food Cost Deducted"),
+        "weekly_budget": weekly_budget,
+        "remaining_budget": remaining_budget,
+        "food_cost_deducted": num(fields.get("Food Cost Deducted")),
+
+        # ✅ Kitchen / Bar budgets
+        "kitchen_budget": kitchen_budget,
+        "bar_budget": bar_budget,
+
+        "kitchen_remaining": kitchen_remaining,
+        "bar_remaining": bar_remaining,
+
+        "kitchen_daily_envelope": kitchen_daily_envelope,
+        "bar_daily_envelope": bar_daily_envelope,
+
+        # Meta
         "locked_by": fields.get("Locked By"),
         "locked_at": fields.get("Locked At"),
         "last_updated_at": fields.get("Last Updated At"),
