@@ -45,7 +45,7 @@ BACKEND_URL = "https://restaurant-ops-backend.onrender.com"
 origins = [
     FRONTEND_URL,
     "http://localhost:5000",
-    "http://127.0.0.1:5000",
+    "https://logbook-frontend-staging.onrender.com",
 ]
 
 app.add_middleware(
@@ -53,7 +53,7 @@ app.add_middleware(
     allow_origins=[
         "https://app.logbook.ph",
         "https://admin.logbook.ph",
-        "https://logbook-app-jjac.onrender.com",  # optional safety fallback
+        "https://logbook-frontend-staging.onrender.com",  # optional safety fallback
     ],
     allow_credentials=True,
     allow_methods=["*"],
